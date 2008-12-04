@@ -21,13 +21,20 @@
 #endif
 
 #ifdef MUTEX_LINUXKERNEL
-// linux kernel mutexes (probably use spinlocks)
+#include <linux/slab.h>     /* kmalloc() */
 // linux kernel hash_table_malloc
+#define hash_table_malloc(x) kmalloc(x,GFP_KERNEL)
 // linux kernel hash_table_free
-#include<atomic.h> //maybe need architecture?
+#define hash_table_free(x) kfree(x)
+// linux kernel mutexes (probably use spinlocks)
+#include<asm/atomic.h> 
 #define generic_atomic_t atomic_t
-#define generic_atomic_init atomic_init
+#define generic_atomic_init(v,a) atomic_set(a,v)
 #define generic_atomic_dec_and_test atomic_dec_and_test
+#define generic_mutex_t spinlock_t
+#define generic_mutex_init(a,b) spin_lock_init(a)
+#define generic_mutex_lock spin_lock_bh
+#define generic_mutex_unlock spin_unlock_bh
 #endif
 #ifdef MUTEX_PTHREAD
 #include <pthread.h>
@@ -87,7 +94,11 @@ static __inline int generic_atomic_dec_and_test(generic_atomic_t* a)
 
 #endif
 
+#ifdef __KERNEL__
+#include<linux/list.h>
+#else
 #include "list.h"
+#endif
 #include "hash_function.h"
 
 #define BUCKET_BITLEN	32
@@ -119,25 +130,39 @@ struct hash_table {
 
 static __inline int hash_table_bucket_lock(struct hash_table *t, unsigned int n)
 {
-	return (generic_mutex_lock(&(t->bucket_locks[n])));
+	 (generic_mutex_lock(&(t->bucket_locks[n])));
+    return 0;
 }
 
 static __inline int hash_table_bucket_unlock(struct hash_table *t, unsigned int n)
 {
-	return (generic_mutex_unlock(&(t->bucket_locks[n])));
+    (generic_mutex_unlock(&(t->bucket_locks[n])));
+	return 0;
 }
 
 static __inline int hash_table_lock(struct hash_table *t)
 {
-	return (generic_mutex_lock(&(t->lock)));
+    (generic_mutex_lock(&(t->lock)));
+	return 0;
 }
 
 static __inline int hash_table_unlock(struct hash_table *t)
 {
-	return (generic_mutex_unlock(&(t->lock)));
+	(generic_mutex_unlock(&(t->lock)));
+    return 0;
 }
 
-#ifdef EBUSY
+#ifndef __KERNEL__
+ #ifdef EBUSY
+  #define WITH_EBUSY
+ #else
+  #undef WITH_EBUSY
+ #endif
+#else
+ #undef WITH_EBUSY
+#endif
+
+#ifdef WITH_EBUSY
 static __inline int hash_table_bucket_locked(struct hash_table *t, unsigned int n)
 {
 	return (generic_mutex_trylock((t->bucket_locks[n])) == EBUSY);
