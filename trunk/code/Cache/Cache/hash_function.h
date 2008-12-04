@@ -6,7 +6,16 @@
 #define __intptr_t_defined
 #define __uintptr_t_defined
 #endif
+
+#ifdef __KERNEL__ 
+//#include<stdint.h>
+#else
+#if GCC
+#include<stdint.h>
+#else
 #include "stdint.h" 	/* Replace with <stdint.h> if appropriate */
+#endif
+#endif
 
 #undef get16bits
 #if (defined(__GNUC__) && defined(__i386__)) || defined(__WATCOMC__) \

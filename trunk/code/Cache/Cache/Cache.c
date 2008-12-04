@@ -1,11 +1,24 @@
 // Cache.cpp : Defines the entry point for the console application.
 //
 
+#ifdef __KERNEL__
+#define GCC
+#endif
+
+#ifndef __KERNEL__
+#ifndef GCC
 #include "stdafx.h"
+#endif
+#include<stdio.h>
 #include<stdlib.h>
 #include<string.h>
-
 #include"list.h"
+#else
+#include<linux/kernel.h>
+#define printf(a, args...) printk(KERN_WARNING a, args)
+#include<linux/list.h>
+#endif
+
 #include"hash_table.h"
 
 #define DEBUGLEVEL 1
@@ -343,7 +356,7 @@ BOOL cache_imp_insert(cache_imp* cache, ADDRESS* addr, cache_node* node, cache_i
 	if(!cache_imp_list_insert(cache,node,insert_where)) return FALSE;
 
 	/* insert into hash table */
-	hash_table_insert_safe(&cache->hash, &node->incache_hashentry, (char*)addr, sizeof(ADDRESS));
+	hash_table_insert_safe(&cache->hash, &node->incache_hashentry, (unsigned char*)addr, sizeof(ADDRESS));
 
 	return TRUE;
 }
@@ -1545,6 +1558,8 @@ void test_store_int(CACHE_CTX* ctx,int iaddr)
 		rtn = 0==ctx->dev_ops.write(ctx->dev_ops.opaque_data,addr,(BYTE*)&x,sizeof(x));
 	}
 }
+
+#ifndef __KERNEL__
 int test1(int argc, char* argv[])
 {
 	return 0;
@@ -1696,7 +1711,7 @@ int main(int argc, char* argv[])
 		printf("buf = %s\n",buf);
 	}
 	t2=clock();
-	printf("t diff: 0x%08x / 0x%08x\n",(unsigned int)(t2-t1),CLOCKS_PER_SEC);
+	printf("t diff: 0x%08x / 0x%08x\n",(unsigned int)(t2-t1),(unsigned int)CLOCKS_PER_SEC);
 
 	if(0){
 		BYTE buf[0x10];
@@ -1724,7 +1739,7 @@ int main(int argc, char* argv[])
 		printf("AGAIN buf = %s\n",buf);
 	}
 	t2=clock();
-	printf("t diff: 0x%08x / 0x%08x\n",(unsigned int)(t2-t1),CLOCKS_PER_SEC);
+	printf("t diff: 0x%08x / 0x%08x\n",(unsigned int)(t2-t1),(unsigned int)CLOCKS_PER_SEC);
 
 
 	{
@@ -1831,4 +1846,5 @@ int main(int argc, char* argv[])
 	}
 	return 0;
 }
+#endif //ifndef __KERNEL__
 
