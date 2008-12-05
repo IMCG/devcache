@@ -327,7 +327,7 @@ static int bb_set_fd(struct bb_device *bb,
         /* dev_ops init */
         bb->ctx->dev_ops.num_blocks=get_capacity(bb->bdev_a->bd_disk);
         bb->ctx->dev_ops.opaque_data = kzalloc(sizeof(struct bb_underdisk),GFP_KERNEL);
-        if(bb->ctx->dev_ops.opaque_data) {
+        if(!bb->ctx->dev_ops.opaque_data) {
 	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->dev_ops.opaque_data\n");
             /* XXX should probably change error code */
 	    	goto out;
@@ -342,7 +342,7 @@ static int bb_set_fd(struct bb_device *bb,
         /* cache_ops init */
         bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk);
         bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
-        if(bb->ctx->dev_ops.opaque_data) {
+        if(!bb->ctx->dev_ops.opaque_data) {
 	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
             /* XXX should probably change error code */
 	    	goto out;
