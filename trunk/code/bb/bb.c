@@ -36,9 +36,11 @@
 #include <linux/highmem.h>
 #include <linux/gfp.h>
 #include <linux/kthread.h>
-//#include <linux/splice.h>
 
 #include <linux/hdreg.h>	/* HDIO_GETGEO */
+#include <linux/completion.h>
+
+#include "../Cache/Cache/Cache.h"
 
 
 #include <asm/uaccess.h>
@@ -58,6 +60,16 @@ module_param(nsectors, int, 0);
 static int ndevices = 4;
 module_param(ndevices, int, 0);
 
+static int BB_KERNEL_SCRATCH_LEN = 16384;
+
+DECLARE_COMPLETION(dup_write_complete);
+
+struct bb_seq_req {
+	struct bb_device *bb;
+	int seq;
+	struct bio *bio_dup;
+};
+
 /* See /usr/src/linux/include/linux/loop.h */
 struct bb_device {
 	int bb_number;
@@ -74,7 +86,105 @@ struct bb_device {
 	struct request_queue    *bb_backing_queue_a;
 	struct block_device     *bdev_b;
 	struct request_queue    *bb_backing_queue_b;
+
+	struct bb_seq_req bb_bio_seq[256];
+	int bb_bio_seq_cnt;
+
+	unsigned char *kbuf; /* For converting to and from bio. */
+	unsigned int kbuf_len;
+	struct CACHE_CTX_st *ctx;
 };
+
+
+/* ----------- CACHE glue ------------*/
+
+/* this struct is being used as the opaque data for accessing the
+ * underlying devices
+ */
+struct bb_underdisk {
+    /* for device access by Cache code */
+	struct bb_device *bb;
+	struct block_device *bdev;
+	struct request_queue *q;
+    /* for Cache code sector allocation */
+    unsigned long long next_free_sector;
+    unsigned int log2_blocksize;
+};
+/* this struct is used for the opaque data sent to the end_io
+ * completion routines for synchronous reads and writes
+ */
+struct bio_readwrite_args {
+    /* for completion */
+	bio_end_io_t* old_endio;
+	struct completion* c;
+};
+
+static void* kmalloc_wrapper(size_t sz)
+{
+    return kmalloc(sz,GFP_KERNEL);
+}
+static void kfree_wrapper(void* p)
+{
+    if(p) //extra safety check (might slow things down?)
+        kfree(p);
+}
+static void* krealloc_wrapper(void* p, size_t newsz)
+{
+    void* n;
+    if((n=kmalloc_wrapper(newsz))==NULL) return NULL;
+    kfree_wrapper(p);
+    return(n);
+}
+static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t sz);
+static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_t sz);
+
+static int bb_sector_alloc(void* arg, ADDRESS* address, size_t sz) {
+    struct bb_underdisk* d = (struct bb_underdisk*)arg;
+	unsigned long long i=d->next_free_sector;
+	unsigned long long bs = 1ull<< d->log2_blocksize;
+
+	*address=i;
+	i+=sz*bs;
+	d->next_free_sector = i;
+	return 0;
+}
+
+/* never really free a sector since allocate is just a 1-up counter */
+static int bb_sector_free_NOP(void* opaque, ADDRESS address, size_t sz) { return 0;}
+
+static CACHE_CTX g_CACHE_CTX_TEMPLATE = {
+		0,0,
+		{
+			kmalloc_wrapper,
+			kfree_wrapper,
+			krealloc_wrapper // no realloc in kernel, but this is never used! (should be removed)
+		},
+		{
+			bb_sync_sector_read,
+			bb_sync_sector_write,
+			NULL,//mdisk_alloc,
+			NULL,
+			NULL,//&under_buf,
+			9,//under_disk_log2_blocksize, /* ALWAYS 512 */
+			0,//under_disk_numblocks,
+			FALSE,
+			NULL
+		},
+		{
+			bb_sync_sector_read,
+			bb_sync_sector_write,
+			bb_sector_alloc,//mdisk_alloc,
+			bb_sector_free_NOP,//mdisk_free, /* used only if write fails */
+			NULL,//&cache_buf,
+			9,//cache_disk_log2_blocksize, /* ALWAYS 512 */
+			0,//cache_disk_numblocks,
+			FALSE,//TRUE,
+			NULL,//mdisk_asyncwrite
+		},
+		0,0
+	};
+
+/* END -------------- Cache glue ------------------------- */
 
 static struct bb_device **Devices = NULL;
 
@@ -85,8 +195,13 @@ static int bb_ioctl(struct inode * inode, struct file * file,
 		    unsigned int cmd, unsigned long arg);
 
 static int bb_make_request(struct request_queue *q, struct bio *bio);
+static int bb_handle_bio(struct bb_device *bb, struct bio *bio);
 static int bb_xfer_bio(struct bb_device*dev, struct bio *bio);
+static int bb_bio_end_io(struct bio *bio, unsigned int bytes, int status);
+static int bb_dup_bio_end_io(struct bio *bio, unsigned int bytes, int status);
 
+static void copybio2kern(struct bio *bio, unsigned char* kaddr, unsigned int klen);
+static void copykern2bio(struct bio *bio, unsigned char* kaddr, unsigned int klen);
 
 static struct block_device_operations bb_fops = {
 	.owner =	THIS_MODULE,
@@ -105,6 +220,13 @@ static struct bb_device *bb_alloc(int i)
 	if (!bb)
 		goto out;
 
+	bb->kbuf = kzalloc(BB_KERNEL_SCRATCH_LEN, GFP_KERNEL);
+
+	if (!bb->kbuf) {
+		goto out;
+	}
+	bb->kbuf_len = BB_KERNEL_SCRATCH_LEN;
+
 	bb->bb_queue = blk_alloc_queue(GFP_KERNEL);
 
 	if (!bb->bb_queue)
@@ -114,6 +236,13 @@ static struct bb_device *bb_alloc(int i)
 
 	/* XXX blk_queue_hardsect_size */
 	blk_queue_hardsect_size(bb->bb_queue, hardsect_size);
+
+	/* This is very inefficient - only supports requests of one
+	 * sector at a time.
+	 */
+
+	blk_queue_max_sectors(bb->bb_queue, 1);
+
 	bb->bb_queue->queuedata = bb;
 
 	disk = bb->bb_disk = alloc_disk(1);
@@ -136,8 +265,14 @@ static struct bb_device *bb_alloc(int i)
 	 * backing devices are added.
 	 */
 	set_capacity(disk, 0);
-
 	add_disk(disk);
+
+	for (i=0; i<sizeof(bb->bb_bio_seq)/sizeof(bb->bb_bio_seq[0]); i++) {
+		bb->bb_bio_seq[i].bb = bb;
+		bb->bb_bio_seq[i].seq = i;
+	}
+	bb->bb_bio_seq_cnt = 0;
+
 	return bb;
 
 out_free_queue:
@@ -161,8 +296,6 @@ static void bb_free(struct bb_device *bb)
 }
 
 static int bb_set_fd(struct bb_device *bb,
-		     struct file *bb_file, /* unused */
-		     struct block_device *bdev,
 		     unsigned int arg)
 {
 	int error;
@@ -171,9 +304,68 @@ static int bb_set_fd(struct bb_device *bb,
 	struct block_device *backing_dev;
 	struct request_queue *backing_queue;
 
-	printk (KERN_WARNING "bb: bb_set_fd entered\n");
-
 	error = -EBADF;
+
+    /* if we have both devices, this should set the cache type */
+	if (bb->backing_cnt == 2) {
+        // if we already had a cache, destroy it and free memory
+        if(bb->ctx) {
+            CACHE_destroy(bb->ctx); //not sure what happends if outstanding async writes!
+            kfree(bb->ctx);
+            bb->ctx = NULL;
+        }
+
+        /* Initialize Cache implementation for bb */
+        bb->ctx = kzalloc(sizeof(*bb->ctx),GFP_KERNEL);
+        if(!bb->ctx) {
+	    	printk (KERN_WARNING "bb: cant allocate bb->ctx\n");
+            /* XXX should probably change error code */
+	    	goto out;
+	    }
+        memcpy(bb->ctx,&g_CACHE_CTX_TEMPLATE,sizeof(*bb->ctx));
+        /* secific initialization */
+        /* dev_ops init */
+        bb->ctx->dev_ops.num_blocks=get_capacity(bb->bdev_a->bd_disk);
+        bb->ctx->dev_ops.opaque_data = kzalloc(sizeof(struct bb_underdisk),GFP_KERNEL);
+        if(bb->ctx->dev_ops.opaque_data) {
+	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->dev_ops.opaque_data\n");
+            /* XXX should probably change error code */
+	    	goto out;
+        }
+        {
+        struct bb_underdisk* d = 
+            (struct bb_underdisk*)bb->ctx->dev_ops.opaque_data;
+        d->bb=bb;
+        d->bdev=bb->bdev_a;
+        d->q=bb->bb_backing_queue_a;
+        }
+        /* cache_ops init */
+        bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk);
+        bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
+        if(bb->ctx->dev_ops.opaque_data) {
+	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
+            /* XXX should probably change error code */
+	    	goto out;
+        }
+        {
+        struct bb_underdisk* d = 
+            (struct bb_underdisk*)bb->ctx->cache_ops.opaque_data;
+        d->bb=bb;
+        d->bdev=bb->bdev_b;
+        d->q=bb->bb_backing_queue_b;
+        d->next_free_sector=0;
+        d->log2_blocksize=bb->ctx->cache_ops.log2_blocksize;
+        }
+        if(!CACHE_init(bb->ctx,arg)) // XXX for now, default type, but this should be based on ioctl
+        {
+	    	printk (KERN_WARNING "bb: CACHE_init FAILED\n");
+            /* XXX should probably change error code */
+	    	goto out;
+        }
+
+        return 0;
+    }
+
 	file = fget(arg);
 
 	if (!file) {
@@ -183,10 +375,14 @@ static int bb_set_fd(struct bb_device *bb,
 	inode = file->f_mapping->host;
 	error = -EINVAL;
 
-	/* XXX Catch recursive BB device.
+	printk (KERN_WARNING "bb: bb_set_fd fd %u inode %lu entered\n",
+		arg, inode->i_ino);
+
+	/* XXX Should we catch recursive BB device?
 	 */
 
 	if (!S_ISBLK(inode->i_mode)) {
+		printk (KERN_WARNING "bb: file is not a block device\n");
 		goto out_putf;
 	}
 
@@ -204,12 +400,16 @@ static int bb_set_fd(struct bb_device *bb,
 	}
 
 	if ((bb->backing_cnt++ % 2) == 0) {
-		printk (KERN_WARNING "bb: set backing_queue_a\n");
+		printk(KERN_WARNING "bb: set dev %p backing_queue_a %p\n",
+		       backing_dev,
+		       backing_queue);
 		bb->bdev_a = backing_dev;
 		bb->bb_backing_queue_a = backing_queue;
 	}
 	else {
-		printk (KERN_WARNING "bb: set backing_queue_b\n");
+		printk(KERN_WARNING "bb: set dev %p backing_queue_b %p\n",
+		       backing_dev,
+		       backing_queue);
 		bb->bdev_b = backing_dev;
 		bb->bb_backing_queue_b = backing_queue;
 	}
@@ -221,7 +421,8 @@ static int bb_set_fd(struct bb_device *bb,
 
 	if (bb->backing_cnt > 1) {
 		set_capacity(bb->bb_disk, 
-			     2 * nsectors*(hardsect_size/KERNEL_SECTOR_SIZE));
+			     1 * nsectors*(hardsect_size/KERNEL_SECTOR_SIZE));
+
 	}
 
 	printk (KERN_WARNING "bb: bb_set_fd exited\n");
@@ -262,8 +463,10 @@ static int __init bb_init(void)
 			printk (KERN_WARNING "bb: failed to allocate bb device\n");
 			/* XXX */
 		}
+
+        Devices[i]->ctx = NULL; //default cache ctx is uninitialized
 	}
-    
+
 	return 0;
 
   out_unregister:
@@ -355,7 +558,7 @@ static int bb_ioctl(struct inode * inode, struct file * file,
 	mutex_lock(&bb->bb_ctl_mutex);
 	switch (cmd) {
 	case LOOP_SET_FD:
-		err = bb_set_fd(bb, file, inode->i_bdev, arg);
+		err = bb_set_fd(bb, arg);
 		break;
 	case LOOP_CHANGE_FD:
 		err = -EBADFD;
@@ -380,7 +583,6 @@ static int bb_ioctl(struct inode * inode, struct file * file,
 	default:
 		printk(KERN_WARNING "bb: bb_ioctl unknown %x failed\n", cmd);
 		err = -EINVAL;
-		/* XXX err = lo->ioctl ? lo->ioctl(lo, cmd, arg) : -EINVAL;*/
 	}
 	mutex_unlock(&bb->bb_ctl_mutex);
 	return err;
@@ -390,15 +592,206 @@ static int bb_ioctl(struct inode * inode, struct file * file,
 static int bb_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct bb_device *bb = q->queuedata;
-	int status;
+	int status = 0;
 
 	printk(KERN_WARNING "bb: bb_make_request entered\n");
 
-	status = bb_xfer_bio(bb, bio);
+	status = bb_handle_bio(bb, bio);
 
 	bio_endio(bio, bio->bi_size, status);
 
 	printk(KERN_WARNING "bb: bb_make_request exited\n");
+
+	return status;
+}
+
+
+
+static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
+{
+	BOOL rc;
+	
+	unsigned char *kaddr;
+	unsigned int len;
+	sector_t sector;
+
+	if ((bio->bi_rw & (1 << BIO_RW)) == 0) {
+		/* Read */
+		kaddr = bb->kbuf;
+		len = bio->bi_size;
+
+		if (len > bb->kbuf_len) {
+			printk(KERN_WARNING "bb: bb_handle_bio bad len\n");
+			return -EINVAL;
+		}
+
+		sector = bio->bi_sector;
+
+		/* Fill struct args */
+
+		rc = CACHE_get(bb->ctx, sector, kaddr, len);
+
+        if(!rc) {
+            printk(KERN_WARNING "bb: CACHE_get failed (%s)\n",
+                CACHE_ERROR2STR(bb->ctx->error));
+            return -EINVAL; //different error?
+        } else {
+	    	/* Copy into bio buffer */
+		    copykern2bio(bio, kaddr, len);
+	    	/* Wait for completion */
+        }
+
+	} else {
+		/* Write */
+		kaddr = bb->kbuf;
+		len = bio->bi_size;
+
+		if (len > bb->kbuf_len) {
+			printk(KERN_WARNING "bb: bb_handle_bio bad len\n");
+			return -EINVAL;
+		}
+
+		/* Fill struct args */
+
+		sector = bio->bi_sector;
+		copybio2kern(bio, kaddr, len);
+		rc = CACHE_put(bb->ctx, sector, kaddr, len);
+        if(!rc) {
+            printk(KERN_WARNING "bb: CACHE_put failed (%s)\n",
+                CACHE_ERROR2STR(bb->ctx->error));
+            return -EINVAL; //different error?
+        }
+		/* Wait for completion */
+	}
+
+	return rc;
+}
+
+static void copybio2kern(struct bio *bio, unsigned char* kaddr, unsigned int klen)
+{
+	struct bio_vec *bvec;
+	int i;
+	__bio_for_each_segment(bvec, bio, i, 0) {
+                unsigned char *addr = page_address(bvec->bv_page);
+                unsigned int len=bvec->bv_len;
+                if(klen < len) len=klen;
+                if(klen<=0) break;
+                memcpy(kaddr,addr,len);
+                kaddr += len;
+                klen -= len;
+        }
+}
+
+static void copykern2bio(struct bio *bio, unsigned char* kaddr, unsigned int klen)
+{
+	struct bio_vec *bvec;
+	int i;
+	__bio_for_each_segment(bvec, bio, i, 0) {
+                unsigned char *addr = page_address(bvec->bv_page);
+                unsigned int len=bvec->bv_len;
+                if(klen < len) len=klen;
+                if(klen<=0) break;
+                memcpy(addr,kaddr,len);
+                kaddr += len;
+                klen -= len;
+        }
+}
+
+static int bb_bio_synchronous_readwrite(
+	struct bb_device *bb,     //needed???
+	struct block_device* bdev, //destination blockdevice* needed???
+	struct request_queue *q,  //destination request_queue*
+	sector_t sector,          //sector to read/write
+	unsigned char* buf,       //src/dst data (kernel mem)
+	unsigned int bytes,       //buf size
+	bool isWrite              //true if writing to device
+	);
+
+static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t sz)
+{
+	int rc;
+	struct bb_underdisk *args = opaque;
+
+	rc = bb_bio_synchronous_readwrite(
+		args->bb,
+		args->bdev,
+		args->q,
+		address,
+		data,
+		sz,
+		false /* isWrite */
+		);
+
+	return rc;
+}
+
+static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_t sz)
+{
+	int rc;
+	struct bb_underdisk *args = opaque;
+
+	rc = bb_bio_synchronous_readwrite(
+		args->bb,
+		args->bdev,
+		args->q,
+		address,
+		data,
+		sz,
+		true /* isWrite */
+		);
+
+	return rc;
+}
+
+
+static int bb_bio_readwrite_end_io(struct bio *bio, unsigned int bytes, int status)
+{
+    struct bio_readwrite_args* args = (struct bio_readwrite_args*)bio->bi_private;
+    int r=0;
+    if(args->old_endio)
+        r=args->old_endio(bio,bytes,status); //normal end_io function for map_kern
+    if(r) return r;
+
+	complete(args->c);
+	return 0;
+}
+static int bb_bio_synchronous_readwrite(
+	struct bb_device *bb,     //needed???
+	struct block_device* bdev, //destination blockdevice* needed???
+	struct request_queue *q,  //destination request_queue*
+	sector_t sector,          //sector to read/write
+	unsigned char* buf,       //src/dst data (kernel mem)
+	unsigned int bytes,       //buf size
+	bool isWrite              //true if writing to device
+	)
+{
+	struct bio *bio_dup;
+	struct bio_readwrite_args args;
+	DECLARE_COMPLETION_ONSTACK(c);  //completion for this request
+	args.c=&c;
+
+	bio_dup = bio_map_kern(q,buf,bytes,GFP_KERNEL); //is GFP_KERNEL ok?
+
+	bio_dup->bi_sector = sector; 
+	bio_dup->bi_bdev = bdev; //needed?
+
+	if(isWrite)
+		/* Convert it into a write */
+		bio_dup->bi_rw |= (1 << BIO_RW);
+	else
+		bio_dup->bi_rw &= ~(1 << BIO_RW);
+        
+
+	args.old_endio = bio_dup->bi_end_io;
+	bio_dup->bi_end_io = bb_bio_readwrite_end_io;
+
+	bio_dup->bi_private = &args; 
+
+	q->make_request_fn(
+		q,
+		bio_dup);
+
+	wait_for_completion(&c);
 
 	return 0;
 }
@@ -431,29 +824,117 @@ static int bb_xfer_bio(struct bb_device *bb, struct bio *bio)
 		return -EINVAL;
 	}
 
-	printk(KERN_WARNING "bb: bb_xfer_bio sector: %ld\n",
-	       bio->bi_sector
-		);
-
 	bio_cpy = bio_clone(bio, GFP_NOIO);
 
-	if (bio->bi_sector < nsectors ) {
-		backing_queue = bb->bb_backing_queue_a;
+	backing_queue = bb->bb_backing_queue_a;
+
+	printk(KERN_WARNING "bb: xfr_io seq %d sector %ld len %d seg %d rw %lx\n",
+	       bb->bb_bio_seq_cnt,
+	       bio->bi_sector,
+	       bio_sectors(bio),
+	       bio_segments(bio),
+	       bio->bi_rw
+		);
+
+	bio_cpy->bi_private = &bb->bb_bio_seq[bb->bb_bio_seq_cnt];
+
+	if (++bb->bb_bio_seq_cnt == sizeof(bb->bb_bio_seq)
+	    / sizeof(bb->bb_bio_seq[0]))
+	{
+		bb->bb_bio_seq_cnt = 0;
 	}
-	else {
-		bio_cpy->bi_sector -= nsectors;
-		backing_queue = bb->bb_backing_queue_b;
-	}
+
+	bio_cpy->bi_end_io = bb_bio_end_io;
 
 	backing_queue->make_request_fn(
 		backing_queue,
 		bio_cpy);
+
+	printk(KERN_WARNING "bb: bb_xfer_bio wait\n");
+
+	if ((bio->bi_rw & (1 << BIO_RW)) == 0) {
+		/* It's a read */
+		wait_for_completion(&dup_write_complete);
+	}
 
 	printk(KERN_WARNING "bb: bb_xfer_bio exited\n");
 
 	return 0;
 }
 
+
+static int bb_bio_end_io(struct bio *bio, unsigned int bytes, int status)
+{
+	struct bio *bio_dup;
+	struct bb_seq_req *req = bio->bi_private;
+	struct bb_device *bb = req->bb;
+	int seq = req->seq;
+	struct request_queue *q;
+
+	printk(KERN_WARNING "bb: end_io seq %d sector %ld len %d seg %d\n",
+	       seq,
+	       bio->bi_sector,
+	       bio_sectors(bio),
+	       bio_segments(bio)
+	);
+
+	/* Create a new bio, fill and submit it to device b.
+	 */
+
+	if ((bio->bi_rw & (1 << BIO_RW))) {
+		/* It's a write */
+		return 0;
+	}
+
+	bio_dup = bio_alloc(GFP_KERNEL, 1);
+
+	bio_init(bio_dup);
+
+	q = bb->bb_backing_queue_b;
+
+	memcpy(bio_dup->bi_io_vec,
+	       bio->bi_io_vec,
+	       bio->bi_max_vecs * sizeof(struct bio_vec));
+
+	bio_dup->bi_sector = (bio->bi_sector - bytes / 512);
+	bio_dup->bi_bdev = bb->bdev_b;
+
+//	bio_dup->bi_flags |= 1 << BIO_CLONED;
+
+	/* Convert it into a write */
+
+	bio_dup->bi_rw = (1 << BIO_RW);
+
+	bio_dup->bi_vcnt = bio->bi_vcnt;
+	bio_dup->bi_size = bytes;
+	bio_dup->bi_idx = bio->bi_idx;
+	bio_phys_segments(q, bio);
+	bio_hw_segments(q, bio);
+
+	bio_dup->bi_end_io = bb_dup_bio_end_io;
+
+	q->make_request_fn(
+		q,
+		bio_dup);
+
+	return 0;
+}
+
+static int bb_dup_bio_end_io(struct bio *bio, unsigned int bytes, int status)
+{
+	int seq = 0;
+
+	printk(KERN_WARNING "bb: dup_end_io seq %d sector %ld len %d seg %d\n",
+	       seq,
+	       bio->bi_sector,
+	       bio_sectors(bio),
+	       bio_segments(bio)
+	);
+
+	complete(&dup_write_complete);
+
+	return 0;
+}
 
 module_init(bb_init);
 module_exit(bb_exit);

@@ -9,15 +9,16 @@
 
 int main(int argc, char *argv[])
 {
-	char *path, *path_target_a, *path_target_b;
+	char *path, *path_target_a, *path_target_b, cache_type;
 
-	if (argc != 4) {
-		fprintf(stderr, "usage: ioctl pathname\n");
+	if (argc != 5) {
+		fprintf(stderr, "usage: ioctl primary_dev cache_dev cache_type\n");
 	}
 
 	path = argv[1];
 	path_target_a = argv[2];
 	path_target_b = argv[3];
+    cache_type = atoi(argv[4]);
 
 	int fd = open(path, O_RDWR);
 	int fd_target_a = open(path_target_a, O_RDONLY);
@@ -40,6 +41,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+
 	int cmd = LOOP_SET_FD;
 
 	if (ioctl(fd, cmd, fd_target_a)) {
@@ -48,6 +50,12 @@ int main(int argc, char *argv[])
 	}
 
 	if (ioctl(fd, cmd, fd_target_b)) {
+		perror("ioctl");
+		return 1;
+	}
+
+    /* enable cache with type */
+	if (ioctl(fd, cmd, cache_type)) {
 		perror("ioctl");
 		return 1;
 	}
