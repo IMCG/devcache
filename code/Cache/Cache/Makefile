@@ -1,9 +1,17 @@
-build:
-	gcc -Wall -DGCC -DDEBUG Cache.c -o CacheTest
+build: withmutex nomutex
+
+withmutex:
+	gcc -Wall -DGCC -DDEBUG -DEBUGLEVEL=255 Cache.c -lpthread -o CacheTest_withmutex
+
+nomutex:
+	gcc -Wall -DGCC -DDEBUG -DEBUGLEVEL=255 -DMUTEX_MANUAL -DMUTEX_NONE Cache.c -lpthread -o CacheTest_nomutex
 
 clean:
-	rm -rf *.o CacheTest
+	rm -rf *.o CacheTest_*
 
 run: build
-	./CacheTest
+	./CacheTest_nomutex
+
+run_mutex: build
+	./CacheTest_withmutex
 
