@@ -22,6 +22,8 @@
 
 #ifdef MUTEX_LINUXKERNEL
 #include <linux/slab.h>     /* kmalloc() */
+#include <linux/mutex.h>
+
 // linux kernel hash_table_malloc
 #define hash_table_malloc(x) kmalloc(x,GFP_KERNEL)
 // linux kernel hash_table_free
@@ -31,10 +33,10 @@
 #define generic_atomic_t atomic_t
 #define generic_atomic_init(v,a) atomic_set(a,v)
 #define generic_atomic_dec_and_test atomic_dec_and_test
-#define generic_mutex_t spinlock_t
-#define generic_mutex_init(a,b) spin_lock_init(a)
-#define generic_mutex_lock spin_lock_bh
-#define generic_mutex_unlock spin_unlock_bh
+#define generic_mutex_t struct mutex
+#define generic_mutex_init(a,b) mutex_init(a)
+#define generic_mutex_lock mutex_lock
+#define generic_mutex_unlock mutex_unlock
 #endif
 #ifdef MUTEX_PTHREAD
 #include <pthread.h>
@@ -130,25 +132,25 @@ struct hash_table {
 
 static __inline int hash_table_bucket_lock(struct hash_table *t, unsigned int n)
 {
-	 (generic_mutex_lock(&(t->bucket_locks[n])));
+	 generic_mutex_lock(&(t->bucket_locks[n]));
     return 0;
 }
 
 static __inline int hash_table_bucket_unlock(struct hash_table *t, unsigned int n)
 {
-    (generic_mutex_unlock(&(t->bucket_locks[n])));
+    generic_mutex_unlock(&(t->bucket_locks[n]));
 	return 0;
 }
 
 static __inline int hash_table_lock(struct hash_table *t)
 {
-    (generic_mutex_lock(&(t->lock)));
+    generic_mutex_lock(&(t->lock));
 	return 0;
 }
 
 static __inline int hash_table_unlock(struct hash_table *t)
 {
-	(generic_mutex_unlock(&(t->lock)));
+	generic_mutex_unlock(&(t->lock));
     return 0;
 }
 
