@@ -12,13 +12,14 @@ int main(int argc, char *argv[])
 	char *path, *path_target_a, *path_target_b, cache_type;
 
 	if (argc != 5) {
-		fprintf(stderr, "usage: ioctl primary_dev cache_dev cache_type\n");
+		fprintf(stderr, "usage: ioctl /dev/bbX primary_dev cache_dev cache_type\n");
+		return 1;
 	}
 
 	path = argv[1];
 	path_target_a = argv[2];
 	path_target_b = argv[3];
-    cache_type = atoi(argv[4]);
+	cache_type = atoi(argv[4]);
 
 	int fd = open(path, O_RDWR);
 	int fd_target_a = open(path_target_a, O_RDONLY);
