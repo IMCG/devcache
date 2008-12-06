@@ -21,7 +21,9 @@
 
 #include"hash_table.h"
 
+#ifndef DEBUGLEVEL
 #define DEBUGLEVEL 1
+#endif
 
 #ifdef _DEBUG
 #define DEBUG
