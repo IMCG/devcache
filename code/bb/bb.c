@@ -609,6 +609,7 @@ static int bb_make_request(struct request_queue *q, struct bio *bio)
 
 static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 {
+	struct bb_underdisk args;
 	BOOL rc;
 	
 	unsigned char *kaddr;
@@ -627,21 +628,26 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 
 		sector = bio->bi_sector;
 
-		/* Fill struct args */
-
+#if 0
 		rc = CACHE_get(bb->ctx, sector, kaddr, len);
 
-        if(!rc) {
-            printk(KERN_WARNING "bb: CACHE_get failed (%s)\n",
-                CACHE_ERROR2STR(bb->ctx->error));
-            return -EINVAL; //different error?
-        } else {
-	    	/* Copy into bio buffer */
-		    copykern2bio(bio, kaddr, len);
+		if(!rc) {
+			printk(KERN_WARNING "bb: CACHE_get failed (%s)\n",
+			       CACHE_ERROR2STR(bb->ctx->error));
+			return -EINVAL; //different error?
+		}
+#else
+		/* Fill struct args */
+		args.bb = bb;
+		args.bdev = bb->bdev_a;
+		args.q = bb->bb_backing_queue_a;
+		bb_sync_sector_read(&args, sector, kaddr, len);
+#endif
+		/* Copy into bio buffer */
+		copykern2bio(bio, kaddr, len);
 	    	/* Wait for completion */
-        }
-
-	} else {
+	}
+	else {
 		/* Write */
 		kaddr = bb->kbuf;
 		len = bio->bi_size;
@@ -651,34 +657,42 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 			return -EINVAL;
 		}
 
-		/* Fill struct args */
-
 		sector = bio->bi_sector;
 		copybio2kern(bio, kaddr, len);
+#if 0
 		rc = CACHE_put(bb->ctx, sector, kaddr, len);
-        if(!rc) {
-            printk(KERN_WARNING "bb: CACHE_put failed (%s)\n",
-                CACHE_ERROR2STR(bb->ctx->error));
-            return -EINVAL; //different error?
-        }
+		if(!rc) {
+			printk(KERN_WARNING "bb: CACHE_put failed (%s)\n",
+			       CACHE_ERROR2STR(bb->ctx->error));
+			return -EINVAL; //different error?
+		}
+#else
+		/* Fill struct args */
+		args.bb = bb;
+		args.bdev = bb->bdev_a;
+		args.q = bb->bb_backing_queue_a;
+		bb_sync_sector_write(&args, sector, kaddr, len);
+#endif
 		/* Wait for completion */
 	}
 
-	return rc;
+	return 0;
 }
 
 static void copybio2kern(struct bio *bio, unsigned char* kaddr, unsigned int klen)
 {
 	struct bio_vec *bvec;
 	int i;
-	__bio_for_each_segment(bvec, bio, i, 0) {
-                unsigned char *addr = page_address(bvec->bv_page);
+
+	bio_for_each_segment(bvec, bio, i) {
+		unsigned char *addr = __bio_kmap_atomic(bio, i, KM_USER0);
                 unsigned int len=bvec->bv_len;
                 if(klen < len) len=klen;
-                if(klen<=0) break;
+		if(klen<=0) break;
                 memcpy(kaddr,addr,len);
                 kaddr += len;
                 klen -= len;
+		__bio_kunmap_atomic(bio, KM_USER0);
         }
 }
 
@@ -686,14 +700,15 @@ static void copykern2bio(struct bio *bio, unsigned char* kaddr, unsigned int kle
 {
 	struct bio_vec *bvec;
 	int i;
-	__bio_for_each_segment(bvec, bio, i, 0) {
-                unsigned char *addr = page_address(bvec->bv_page);
+
+	bio_for_each_segment(bvec, bio, i) {
+		unsigned char *addr = __bio_kmap_atomic(bio, i, KM_USER0);
                 unsigned int len=bvec->bv_len;
                 if(klen < len) len=klen;
-                if(klen<=0) break;
                 memcpy(addr,kaddr,len);
                 kaddr += len;
                 klen -= len;
+		__bio_kunmap_atomic(bio, KM_USER0);
         }
 }
 
