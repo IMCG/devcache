@@ -1,7 +1,7 @@
 build: withmutex nomutex
 
 withmutex:
-	gcc -Wall -DGCC -DDEBUG -DEBUGLEVEL=255 Cache.c -lpthread -o CacheTest_withmutex
+	gcc -Wall -DGCC -DDEBUG -DEBUGLEVEL=255 -DDEBUG_LOCKS Cache.c -lpthread -o CacheTest_withmutex
 
 nomutex:
 	gcc -Wall -DGCC -DDEBUG -DEBUGLEVEL=255 -DMUTEX_MANUAL -DMUTEX_NONE Cache.c -lpthread -o CacheTest_nomutex

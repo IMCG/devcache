@@ -19,8 +19,6 @@
 #include<linux/list.h>
 #endif
 
-#include"hash_table.h"
-
 #ifndef DEBUGLEVEL
 #define DEBUGLEVEL 1
 #endif
@@ -36,6 +34,8 @@
 #define DBG(x)
 #define DBGL(l,x)
 #endif
+
+#include"hash_table.h"
 
 #include "Cache.h"
 
