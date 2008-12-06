@@ -43,8 +43,8 @@
 typedef pthread_mutex_t generic_mutex_t;
 #define generic_mutex_init pthread_mutex_init
 #ifdef DEBUG_LOCKS
-#define generic_mutex_lock(m) dprintf("%s %d lock(%p)\n",__FILE__,__LINE__,m); pthread_mutex_lock(m)
-#define generic_mutex_unlock(m) dprintf("%s %d unlock(%p)\n",__FILE__,__LINE__,m);pthread_mutex_unlock(m)
+#define generic_mutex_lock(m) dprintf("%s:%d lock(%p)\n",__FILE__,__LINE__,m); pthread_mutex_lock(m)
+#define generic_mutex_unlock(m) dprintf("%s:%d unlock(%p)\n",__FILE__,__LINE__,m);pthread_mutex_unlock(m)
 #else
 #define generic_mutex_lock pthread_mutex_lock
 #define generic_mutex_unlock pthread_mutex_unlock
