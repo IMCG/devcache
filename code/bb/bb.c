@@ -310,6 +310,7 @@ static int bb_set_fd(struct bb_device *bb,
 
     /* if we have both devices, this should set the cache type */
 	if (bb->backing_cnt == 2) {
+#ifndef DISABLE_CACHE
         // if we already had a cache, destroy it and free memory
         if(bb->ctx) {
             CACHE_destroy(bb->ctx); //not sure what happends if outstanding async writes!
@@ -344,7 +345,7 @@ static int bb_set_fd(struct bb_device *bb,
         /* cache_ops init */
         bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk);
         bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
-        if(!bb->ctx->dev_ops.opaque_data) {
+        if(!bb->ctx->cache_ops.opaque_data) {
 	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
             /* XXX should probably change error code */
 	    	goto out;
@@ -367,7 +368,7 @@ static int bb_set_fd(struct bb_device *bb,
 #ifdef SIMPLE_LOCKS
         mutex_init(&bb->cache_lock);
 #endif
-
+#endif /* DISABLE_CACHE */
         return 0;
     }
 
@@ -652,7 +653,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bb = bb;
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
-		bb_sync_sector_read(&args, sector, kaddr, len);
+		bb_sync_sector_read(&args, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
 #endif
 		/* Copy into bio buffer */
 		copykern2bio(bio, kaddr, len);
@@ -688,7 +689,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bb = bb;
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
-		bb_sync_sector_write(&args, sector, kaddr, len);
+		bb_sync_sector_write(&args, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
 #endif
 		/* Wait for completion */
 	}
@@ -750,7 +751,7 @@ static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t
 		args->bb,
 		args->bdev,
 		args->q,
-		address,
+		address>>args->log2_blocksize,
 		data,
 		sz,
 		false /* isWrite */
@@ -770,7 +771,7 @@ static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_
 		args->bb,
 		args->bdev,
 		args->q,
-		address,
+		address>>args->log2_blocksize,
 		data,
 		sz,
 		true /* isWrite */
