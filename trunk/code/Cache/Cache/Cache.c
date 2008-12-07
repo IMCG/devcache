@@ -15,7 +15,7 @@
 #include"list.h"
 #else
 #include<linux/kernel.h>
-#define printf(a, args...) printk(KERN_WARNING a, args)
+#define printf(args...) printk(KERN_WARNING args)
 #include<linux/list.h>
 #endif
 
@@ -29,7 +29,7 @@
 #ifdef DEBUG
 #define DBGL(l,x) if(DEBUGLEVEL&l) x
 #define DBG(x) DBGL(128,x)
-#define dprintf printf("--DEBUG--> ");printf
+#define dprintf(a...) printf(a)
 #else
 #define DBG(x)
 #define DBGL(l,x)
@@ -314,7 +314,7 @@ BOOL cache_imp_unlock(cache_imp* cache)
 BOOL cache_retrieve_evictee(cache_imp* cache, cache_node** evictee)
 {
 	BOOL rtn = FALSE;
-	DBG({dprintf("cache_retrieve_evictee\n");})
+	DBG( { dprintf("cache_retrieve_evictee %c\n",' '); } )
 
 	if(!cache || !evictee) return FALSE;
 	generic_mutex_lock(&cache->lock);

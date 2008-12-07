@@ -20,7 +20,7 @@
 #endif
 #endif
 
-#ifdef MUTEX_LINUXKERNEL
+#ifdef __KERNEL__
 #include <linux/slab.h>     /* kmalloc() */
 #include <linux/mutex.h>
 
@@ -28,6 +28,12 @@
 #define hash_table_malloc(x) kmalloc(x,GFP_KERNEL)
 // linux kernel hash_table_free
 #define hash_table_free(x) kfree(x)
+#else
+#define hash_table_malloc malloc
+#define hash_table_free free
+#endif
+
+#ifdef MUTEX_LINUXKERNEL
 // linux kernel mutexes (probably use spinlocks)
 #include<asm/atomic.h> 
 #define generic_atomic_t atomic_t
@@ -50,8 +56,6 @@ typedef pthread_mutex_t generic_mutex_t;
 #define generic_mutex_unlock pthread_mutex_unlock
 #endif
 #define generic_mutex_trylock pthread_mutex_trylock
-#define hash_table_malloc malloc
-#define hash_table_free free
 
 typedef struct generic_atomic_st
 {
@@ -79,8 +83,6 @@ typedef int generic_mutex_t;
 #define generic_mutex_lock(m) 0
 #define generic_mutex_unlock(m) 0
 #define generic_mutex_trylock(m) 0
-#define hash_table_malloc malloc
-#define hash_table_free free
 
 typedef struct generic_atomic_st
 {

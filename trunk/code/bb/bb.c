@@ -42,7 +42,6 @@
 
 #include "../Cache/Cache/Cache.h"
 
-
 #include <asm/uaccess.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
@@ -93,6 +92,9 @@ struct bb_device {
 	unsigned char *kbuf; /* For converting to and from bio. */
 	unsigned int kbuf_len;
 	struct CACHE_CTX_st *ctx;
+#ifdef SIMPLE_LOCKS
+    struct mutex cache_lock;
+#endif
 };
 
 
@@ -362,6 +364,9 @@ static int bb_set_fd(struct bb_device *bb,
             /* XXX should probably change error code */
 	    	goto out;
         }
+#ifdef SIMPLE_LOCKS
+        mutex_init(&bb->cache_lock);
+#endif
 
         return 0;
     }
@@ -628,8 +633,14 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 
 		sector = bio->bi_sector;
 
-#if 0
-		rc = CACHE_get(bb->ctx, sector, kaddr, len);
+#ifndef DISABLE_CACHE
+#ifdef SIMPLE_LOCKS
+        mutex_lock(&bb->cache_lock);
+#endif
+		rc = CACHE_get(bb->ctx, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
+#ifdef SIMPLE_LOCKS
+        mutex_unlock(&bb->cache_lock);
+#endif
 
 		if(!rc) {
 			printk(KERN_WARNING "bb: CACHE_get failed (%s)\n",
@@ -659,8 +670,14 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 
 		sector = bio->bi_sector;
 		copybio2kern(bio, kaddr, len);
-#if 0
-		rc = CACHE_put(bb->ctx, sector, kaddr, len);
+#ifndef DISABLE_CACHE
+#ifdef SIMPLE_LOCKS
+        mutex_lock(&bb->cache_lock);
+#endif
+		rc = CACHE_put(bb->ctx, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
+#ifdef SIMPLE_LOCKS
+        mutex_unlock(&bb->cache_lock);
+#endif
 		if(!rc) {
 			printk(KERN_WARNING "bb: CACHE_put failed (%s)\n",
 			       CACHE_ERROR2STR(bb->ctx->error));
@@ -727,6 +744,8 @@ static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t
 	int rc;
 	struct bb_underdisk *args = opaque;
 
+    printk(KERN_WARNING "bb_sync_sector_read %p %llx %p %08x\n",opaque,address,data,sz);
+
 	rc = bb_bio_synchronous_readwrite(
 		args->bb,
 		args->bdev,
@@ -744,6 +763,8 @@ static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_
 {
 	int rc;
 	struct bb_underdisk *args = opaque;
+
+    printk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x\n",opaque,address,data,sz);
 
 	rc = bb_bio_synchronous_readwrite(
 		args->bb,
@@ -783,9 +804,20 @@ static int bb_bio_synchronous_readwrite(
 	struct bio *bio_dup;
 	struct bio_readwrite_args args;
 	DECLARE_COMPLETION_ONSTACK(c);  //completion for this request
+
+	q = bdev_get_queue(bdev);
+
+    printk(KERN_WARNING "bb_bio_synchronous_readwrite %p %p %p %llx %p %08x %d\n",bb,bdev,q,sector,buf,bytes,isWrite);
+
 	args.c=&c;
 
-	bio_dup = bio_map_kern(q,buf,bytes,GFP_KERNEL); //is GFP_KERNEL ok?
+	bio_dup = bio_map_kern(q,buf,bytes,GFP_NOIO); //is GFP_KERNEL ok?
+
+    if(!bio_dup) {
+        printk(KERN_WARNING "bio_map_kern FAILED!\n");
+        return -1;
+    }
+    printk(KERN_WARNING "bio_map_kern success\n");
 
 	bio_dup->bi_sector = sector; 
 	bio_dup->bi_bdev = bdev; //needed?
