@@ -33,7 +33,7 @@ ioctl: ioctl.c
 	$(CC) -o ioctl ioctl.c
 
 clean:
-	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions ioctl ../Cache/Cache/*.o ../Cache/Cache/.Cache.* Module.symvers
+	rm -rf *.o *~ core .depend .*.cmd *.ko *.mod.c .tmp_versions ioctl ../Cache/Cache/*.o ../Cache/Cache/.Cache.* Module.symvers file1 file2
 
 depend .depend dep:
 	$(CC) $(CFLAGS) -M *.c > .depend

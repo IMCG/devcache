@@ -559,7 +559,7 @@ BOOL WN_get(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz)
 		toCopy = bs-offset>sz?sz:bs-offset;
 		memcpy(data,buf+offset,toCopy);
 		cache_free(buf);
-		startblock=1;
+		startblock=bs;
 		sz-=toCopy;
 	}
 	for(i=startblock;(i+bs)<=sz;i+=bs)
@@ -1280,19 +1280,15 @@ BOOL CACHE_init(PCACHE_CTX ctx,CACHE_TYPE type)
 	case CACHE_TYPE_default:
 		//break; // default type is WN_LRU
 	case CACHE_TYPE_WN_LRU:
-		if(!CACHE_NOERROR(ctx->error=CACHEi_initdefault(ctx))) break;
 		if(!CACHE_NOERROR(ctx->error=CACHEi_initWNLRU(ctx))) break;
 		break;
 	case CACHE_TYPE_WN_MRU:
-		if(!CACHE_NOERROR(ctx->error=CACHEi_initdefault(ctx))) break;
 		if(!CACHE_NOERROR(ctx->error=CACHEi_initWNMRU(ctx))) break;
 		break;
 	case CACHE_TYPE_WT_LRU:
-		if(!CACHE_NOERROR(ctx->error=CACHEi_initdefault(ctx))) break;
 		if(!CACHE_NOERROR(ctx->error=CACHEi_initWTLRU(ctx))) break;
 		break;
 	case CACHE_TYPE_WT_MRU:
-		if(!CACHE_NOERROR(ctx->error=CACHEi_initdefault(ctx))) break;
 		if(!CACHE_NOERROR(ctx->error=CACHEi_initWTMRU(ctx))) break;
 		break;
 	default:
