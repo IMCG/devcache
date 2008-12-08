@@ -676,6 +676,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bb = bb;
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
+        args.log2_blocksize=bb->ctx->dev_ops.log2_blocksize;
 		bb_sync_sector_read(&args, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
 #endif
 		/* Copy into bio buffer */
@@ -712,6 +713,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bb = bb;
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
+        args.log2_blocksize=bb->ctx->dev_ops.log2_blocksize;
 		bb_sync_sector_write(&args, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
 #endif
 		/* Wait for completion */
