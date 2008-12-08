@@ -297,6 +297,26 @@ static void bb_free(struct bb_device *bb)
 	printk (KERN_WARNING "bb: bb_free exited\n");
 }
 
+static unsigned int mylog2(unsigned int s)
+{
+    int i,j=-1;
+    for(i=0;i<32;++i)
+    {
+        if(s & (1<<i))
+        {
+            if(j!=-1)
+            {
+                printk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
+                return j;
+            }
+            j=i;
+        }
+    }
+    if(j<0) j=0;
+    printk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
+    return (unsigned int)j;
+}
+
 static int bb_set_fd(struct bb_device *bb,
 		     unsigned int arg)
 {
@@ -329,6 +349,7 @@ static int bb_set_fd(struct bb_device *bb,
         /* secific initialization */
         /* dev_ops init */
         bb->ctx->dev_ops.num_blocks=get_capacity(bb->bdev_a->bd_disk);
+        bb->ctx->dev_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
         bb->ctx->dev_ops.opaque_data = kzalloc(sizeof(struct bb_underdisk),GFP_KERNEL);
         if(!bb->ctx->dev_ops.opaque_data) {
 	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->dev_ops.opaque_data\n");
@@ -344,6 +365,7 @@ static int bb_set_fd(struct bb_device *bb,
         }
         /* cache_ops init */
         bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk);
+        bb->ctx->cache_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_b));
         bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
         if(!bb->ctx->cache_ops.opaque_data) {
 	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
@@ -702,16 +724,16 @@ static void copybio2kern(struct bio *bio, unsigned char* kaddr, unsigned int kle
 	struct bio_vec *bvec;
 	int i;
 
-	bio_for_each_segment(bvec, bio, i) {
-		unsigned char *addr = __bio_kmap_atomic(bio, i, KM_USER0);
-                unsigned int len=bvec->bv_len;
-                if(klen < len) len=klen;
-		if(klen<=0) break;
-                memcpy(kaddr,addr,len);
-                kaddr += len;
-                klen -= len;
-		__bio_kunmap_atomic(bio, KM_USER0);
-        }
+    bio_for_each_segment(bvec, bio, i) {
+        unsigned char *addr = __bio_kmap_atomic(bio, i, KM_USER0);
+        unsigned int len=bvec->bv_len;
+        if(klen < len) len=klen;
+        memcpy(kaddr,addr,len);
+        kaddr += len;
+        klen -= len;
+        __bio_kunmap_atomic(bio, KM_USER0);
+        if(klen<=0) break;
+    }
 }
 
 static void copykern2bio(struct bio *bio, unsigned char* kaddr, unsigned int klen)
@@ -720,14 +742,15 @@ static void copykern2bio(struct bio *bio, unsigned char* kaddr, unsigned int kle
 	int i;
 
 	bio_for_each_segment(bvec, bio, i) {
-		unsigned char *addr = __bio_kmap_atomic(bio, i, KM_USER0);
-                unsigned int len=bvec->bv_len;
-                if(klen < len) len=klen;
-                memcpy(addr,kaddr,len);
-                kaddr += len;
-                klen -= len;
+        unsigned char *addr = __bio_kmap_atomic(bio, i, KM_USER0);
+        unsigned int len=bvec->bv_len;
+        if(klen < len) len=klen;
+        memcpy(addr,kaddr,len);
+        kaddr += len;
+        klen -= len;
 		__bio_kunmap_atomic(bio, KM_USER0);
-        }
+        if(klen<=0) break;
+    }
 }
 
 static int bb_bio_synchronous_readwrite(
