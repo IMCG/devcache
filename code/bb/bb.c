@@ -362,6 +362,7 @@ static int bb_set_fd(struct bb_device *bb,
         d->bb=bb;
         d->bdev=bb->bdev_a;
         d->q=bb->bb_backing_queue_a;
+        d->log2_blocksize=bb->ctx->dev_ops.log2_blocksize;
         }
         /* cache_ops init */
         bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk);
@@ -788,7 +789,7 @@ static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_
 	int rc;
 	struct bb_underdisk *args = opaque;
 
-    printk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x\n",opaque,address,data,sz);
+    printk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
 
 	rc = bb_bio_synchronous_readwrite(
 		args->bb,
