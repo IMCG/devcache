@@ -514,6 +514,10 @@ static void __exit bb_exit(void)
 
 	for (i = 0; i < ndevices; i++) {
 		struct bb_device *dev = Devices[i];
+#ifndef DISABLE_CACHE
+        if(dev && dev->ctx)
+            CACHE_destroy(dev->ctx);
+#endif
 		bb_free(dev);
 	}
 	unregister_blkdev(bb_major, "bb");
