@@ -704,6 +704,13 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
 		}
 		else
 		{
+		    if(isPut)
+    		{
+    			/* write to disk */
+    			if(0!=ictx->ctx->dev_ops.write(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
+					return FALSE;
+    			}
+    		}
 			if(isPut && isThru)
 			{
 				/* do write to cache_dev. all writes to cache_dev upon cache hit are synchronous */
@@ -847,6 +854,15 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
 					}
 				}
 			}	
+
+        /* cache miss, write to primary disk (async write to cache started already) */
+    		if(isPut)
+    		{
+    			/* write to disk */
+    			if(0!=ictx->ctx->dev_ops.write(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
+    					return FALSE;
+    			}
+    		}
 		
 			if(!cleaningDirtyNode && !gotEvictee)
 			{
@@ -867,14 +883,6 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
 					if(abuf) ictx->ctx->mem_ops.free(abuf);
 					return -1;
 				}
-			}
-		}
-
-		if(isPut)
-		{
-			/* write to disk */
-			if(0!=ictx->ctx->dev_ops.write(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
-					return FALSE;
 			}
 		}
 
