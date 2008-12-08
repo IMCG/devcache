@@ -281,7 +281,8 @@ BOOL cache_imp_list_insert(cache_imp* cache, cache_node* node, cache_imp_insertt
 
 BOOL cache_imp_insert(cache_imp* cache, ADDRESS* addr, cache_node* node, cache_imp_inserttype insert_where)
 {
-	DBG({dprintf("cache_imp_insert: addr:0x%08llx node:%p where:%d\n",*addr,node,insert_where);})
+	DBG({dprintf("cache_imp_insert: &addr:%p node:%p where:%d\n",addr,node,insert_where);})
+	DBG(if(addr){dprintf("cache_imp_insert (ADDR): addr:%llx node:%p where:%d\n",*addr,node,insert_where);})
 
 	/* insert into access list at front or back */
 	if(!cache_imp_list_insert(cache,node,insert_where)) return FALSE;
@@ -332,7 +333,7 @@ BOOL cache_imp_remove(cache_imp* cache, cache_node* node);
 BOOL cache_reinsert_node(cache_imp* cache, ADDRESS* addr, cache_node* node)
 {
 	BOOL rtn = FALSE;
-	DBG({dprintf("cache_reinsert_node: addr: 0x%08llx node:%p\n",*addr,node);})
+	DBG({dprintf("cache_reinsert_node: &addr: %p node:%p\n",addr,node);})
 
 	if(!cache || !node) return FALSE;
 
@@ -341,6 +342,7 @@ BOOL cache_reinsert_node(cache_imp* cache, ADDRESS* addr, cache_node* node)
 	/* new key */
 	if(addr!=NULL)
 	{
+		DBG({dprintf("cache_reinsert_node: NEW KEY addr: %llx node:%p\n",*addr,node);})
 		if(!cache_imp_remove(cache,node))
 		{
 			rtn=FALSE;
@@ -392,9 +394,11 @@ BOOL cache_touch_node(cache_imp* cache, cache_node* node)
 BOOL cache_insert_node(cache_imp* cache, ADDRESS* addr, cache_node* node)
 {
 	BOOL rtn = FALSE;
-	DBG({dprintf("cache_insert_node: addr: 0x%08llx node:%p\n",*addr,node);})
+	DBG({dprintf("cache_insert_node: &addr: %p node:%p\n",addr,node);})
 
 	if(!cache || !addr || !node) return FALSE;
+
+	DBG({dprintf("cache_insert_node (ADDR): addr: %llx node:%p\n",*addr,node);})
 
 	generic_mutex_lock(&cache->lock);
 
@@ -434,9 +438,11 @@ cache_imp_insert_data_cleanup:
 BOOL cache_retrieve_node(cache_imp* cache, ADDRESS* addr, cache_node** node)
 {
 	BOOL rtn = FALSE;
-	DBG({dprintf("cache_retrieve_node: addr:0x%08llx\n",*addr);})
+	DBG({dprintf("cache_retrieve_node: addr:%p\n",addr);})
 
 	if(!cache || !addr || !node) return FALSE;
+
+	DBG({dprintf("cache_retrieve_node (ADDR): addr:0x%08llx\n",*addr);})
 
 	generic_mutex_lock(&cache->lock);
 
@@ -469,7 +475,8 @@ cache_node* cache_imp_try(cache_imp* cache, ADDRESS* addr)
 	cache_node *tmp;
 	struct hash_entry *hentry;
 
-	DBG({dprintf("cache_imp_try: addr:0x%08llx\n",*addr);})
+	DBG({dprintf("cache_imp_try: addr:%p\n",addr);})
+	DBG(if(addr){dprintf("cache_imp_try (ADDR): addr:0x%08llx\n",*addr);})
 
 
 	if ((hentry =
