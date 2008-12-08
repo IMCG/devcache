@@ -2,6 +2,8 @@ make
 
 dd if=/dev/zero of=./file1 bs=512 count=20000
 dd if=/dev/zero of=./file2 bs=512 count=20000
+chmod 777 ./file1
+chmod 777 ./file2
 sudo losetup /dev/loop1 ./file1
 sudo losetup /dev/loop2 ./file2
 
