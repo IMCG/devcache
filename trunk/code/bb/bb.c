@@ -629,6 +629,7 @@ static int bb_make_request(struct request_queue *q, struct bio *bio)
 
 	printk(KERN_WARNING "bb: bb_make_request entered\n");
 
+//	blk_queue_bounce(q,&bio);  // YYY MIKE
 	status = bb_handle_bio(bb, bio);
 
 	bio_endio(bio, bio->bi_size, status);
@@ -680,8 +681,8 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bb = bb;
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
-        args.log2_blocksize=bb->ctx->dev_ops.log2_blocksize;
-		bb_sync_sector_read(&args, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
+        	args.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
+		bb_sync_sector_read(&args, ((ADDRESS)sector)<<args.log2_blocksize, kaddr, len);
 #endif
 		/* Copy into bio buffer */
 		copykern2bio(bio, kaddr, len);
@@ -717,8 +718,8 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bb = bb;
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
-        args.log2_blocksize=bb->ctx->dev_ops.log2_blocksize;
-		bb_sync_sector_write(&args, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
+        	args.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
+		bb_sync_sector_write(&args, ((ADDRESS)sector)<<args.log2_blocksize, kaddr, len);
 #endif
 		/* Wait for completion */
 	}
@@ -815,6 +816,9 @@ static int bb_bio_readwrite_end_io(struct bio *bio, unsigned int bytes, int stat
 {
     struct bio_readwrite_args* args = (struct bio_readwrite_args*)bio->bi_private;
     int r=0;
+
+    printk(KERN_WARNING "completing bb_bio_synchronous_readwrite\n");
+
     if(args->old_endio)
         r=args->old_endio(bio,bytes,status); //normal end_io function for map_kern
     if(r) return r;
@@ -842,9 +846,9 @@ static int bb_bio_synchronous_readwrite(
 
 	args.c=&c;
 
-	bio_dup = bio_map_kern(q,buf,bytes,GFP_NOIO); //is GFP_KERNEL ok?
+	bio_dup = bio_map_kern(q,buf,bytes,GFP_KERNEL); //is GFP_KERNEL ok?
 
-    if(!bio_dup) {
+    if(!bio_dup || bio_dup==ERR_PTR(-EINVAL) || IS_ERR(bio_dup)) {
         printk(KERN_WARNING "bio_map_kern FAILED!\n");
         return -1;
     }
