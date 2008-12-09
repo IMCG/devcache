@@ -1,12 +1,18 @@
 # Comment/uncomment the following line to disable/enable debugging
-DEBUG = y
+#DEBUG = y
+CACHE_DISABLED = y
 
+ifeq ($(CACHE_DISABLED),y)
+  DISABLE_CACHE = -DDISABLE_CACHE
+else
+  DISABLE_CACHE = 
+endif
 
 # Add your debugging flag (or not) to CFLAGS
 ifeq ($(DEBUG),y)
-  DEBFLAGS = -O -g -DSIMPLE_LOCKS -DBB_DEBUG -DDEBUG -DMUTEX_MANUAL -DMUTEX_NONE -DDEBUGLEVEL=255 # "-O" is needed to expand inlines
+  DEBFLAGS = -O -g $(DISABLE_CACHE) -DSIMPLE_LOCKS -DDEBUG -DMUTEX_MANUAL -DMUTEX_NONE -DDEBUGLEVEL=0 # "-O" is needed to expand inlines
 else
-  DEBFLAGS = -O2 -DSIMPLE_LOCKS -DMUTEX_MANUAL -DMUTEX_NONE
+  DEBFLAGS = -O2 -DSIMPLE_LOCKS -DMUTEX_MANUAL -DMUTEX_NONE $(DISABLE_CACHE)
 endif
 
 CFLAGS += $(DEBFLAGS)
