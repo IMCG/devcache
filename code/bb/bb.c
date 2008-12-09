@@ -42,6 +42,12 @@
 
 #include "../Cache/Cache/Cache.h"
 
+#ifdef BB_DEBUG
+#define dprintk(a...) printk(a)
+#else
+#define dprintk(a...)
+#endif
+
 #include <asm/uaccess.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
@@ -287,14 +293,14 @@ out:
 
 static void bb_free(struct bb_device *bb)
 {
-	printk (KERN_WARNING "bb: bb_free entered\n");
+	dprintk (KERN_WARNING "bb: bb_free entered\n");
 
 	blk_cleanup_queue(bb->bb_queue);
 	del_gendisk(bb->bb_disk);
 	put_disk(bb->bb_disk);
 	kfree(bb);
 
-	printk (KERN_WARNING "bb: bb_free exited\n");
+	dprintk (KERN_WARNING "bb: bb_free exited\n");
 }
 
 static unsigned int mylog2(unsigned int s)
@@ -306,14 +312,14 @@ static unsigned int mylog2(unsigned int s)
         {
             if(j!=-1)
             {
-                printk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
+                dprintk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
                 return j;
             }
             j=i;
         }
     }
     if(j<0) j=0;
-    printk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
+    dprintk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
     return (unsigned int)j;
 }
 
@@ -341,7 +347,7 @@ static int bb_set_fd(struct bb_device *bb,
         /* Initialize Cache implementation for bb */
         bb->ctx = kzalloc(sizeof(*bb->ctx),GFP_KERNEL);
         if(!bb->ctx) {
-	    	printk (KERN_WARNING "bb: cant allocate bb->ctx\n");
+	    	dprintk (KERN_WARNING "bb: cant allocate bb->ctx\n");
             /* XXX should probably change error code */
 	    	goto out;
 	    }
@@ -352,7 +358,7 @@ static int bb_set_fd(struct bb_device *bb,
         bb->ctx->dev_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
         bb->ctx->dev_ops.opaque_data = kzalloc(sizeof(struct bb_underdisk),GFP_KERNEL);
         if(!bb->ctx->dev_ops.opaque_data) {
-	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->dev_ops.opaque_data\n");
+	    	dprintk (KERN_WARNING "bb: cant allocate bb->ctx->dev_ops.opaque_data\n");
             /* XXX should probably change error code */
 	    	goto out;
         }
@@ -369,7 +375,7 @@ static int bb_set_fd(struct bb_device *bb,
         bb->ctx->cache_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_b));
         bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
         if(!bb->ctx->cache_ops.opaque_data) {
-	    	printk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
+	    	dprintk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
             /* XXX should probably change error code */
 	    	goto out;
         }
@@ -384,7 +390,7 @@ static int bb_set_fd(struct bb_device *bb,
         }
         if(!CACHE_init(bb->ctx,arg)) // XXX for now, default type, but this should be based on ioctl
         {
-	    	printk (KERN_WARNING "bb: CACHE_init FAILED\n");
+	    	dprintk (KERN_WARNING "bb: CACHE_init FAILED\n");
             /* XXX should probably change error code */
 	    	goto out;
         }
@@ -404,14 +410,14 @@ static int bb_set_fd(struct bb_device *bb,
 	inode = file->f_mapping->host;
 	error = -EINVAL;
 
-	printk (KERN_WARNING "bb: bb_set_fd fd %u inode %lu entered\n",
+	dprintk (KERN_WARNING "bb: bb_set_fd fd %u inode %lu entered\n",
 		arg, inode->i_ino);
 
 	/* XXX Should we catch recursive BB device?
 	 */
 
 	if (!S_ISBLK(inode->i_mode)) {
-		printk (KERN_WARNING "bb: file is not a block device\n");
+		dprintk (KERN_WARNING "bb: file is not a block device\n");
 		goto out_putf;
 	}
 
@@ -424,19 +430,19 @@ static int bb_set_fd(struct bb_device *bb,
 	backing_queue = bdev_get_queue(backing_dev);
 
 	if (!backing_queue) {
-		printk (KERN_WARNING "bb: bad bb_backing_queue\n");
+		dprintk (KERN_WARNING "bb: bad bb_backing_queue\n");
 		goto out_putf;
 	}
 
 	if ((bb->backing_cnt++ % 2) == 0) {
-		printk(KERN_WARNING "bb: set dev %p backing_queue_a %p\n",
+		dprintk(KERN_WARNING "bb: set dev %p backing_queue_a %p\n",
 		       backing_dev,
 		       backing_queue);
 		bb->bdev_a = backing_dev;
 		bb->bb_backing_queue_a = backing_queue;
 	}
 	else {
-		printk(KERN_WARNING "bb: set dev %p backing_queue_b %p\n",
+		dprintk(KERN_WARNING "bb: set dev %p backing_queue_b %p\n",
 		       backing_dev,
 		       backing_queue);
 		bb->bdev_b = backing_dev;
@@ -449,12 +455,14 @@ static int bb_set_fd(struct bb_device *bb,
 	 */
 
 	if (bb->backing_cnt > 1) {
+		blk_queue_hardsect_size(bb->bb_queue, bdev_hardsect_size(bb->bdev_a));
 		set_capacity(bb->bb_disk, 
-			     1 * nsectors*(hardsect_size/KERNEL_SECTOR_SIZE));
+        			get_capacity(bb->bdev_a->bd_disk) *
+        			(bdev_hardsect_size(bb->bdev_a)/KERNEL_SECTOR_SIZE));
 
 	}
 
-	printk (KERN_WARNING "bb: bb_set_fd exited\n");
+	dprintk (KERN_WARNING "bb: bb_set_fd exited\n");
 	
 	return 0;
 
@@ -469,14 +477,14 @@ static int __init bb_init(void)
 {
 	int i;
 
-	printk (KERN_WARNING "bb: bb_init entered\n");
+	dprintk (KERN_WARNING "bb: bb_init entered\n");
 
 	/*
 	 * Get registered.
 	 */
 	bb_major = register_blkdev(bb_major, "bb");
 	if (bb_major <= 0) {
-		printk(KERN_WARNING "bb: unable to get major number\n");
+		dprintk(KERN_WARNING "bb: unable to get major number\n");
 		return -EBUSY;
 	}
 	/*
@@ -489,7 +497,7 @@ static int __init bb_init(void)
 		Devices[i] = bb_alloc(i);
 
 		if (Devices[i] == NULL) {
-			printk (KERN_WARNING "bb: failed to allocate bb device\n");
+			dprintk (KERN_WARNING "bb: failed to allocate bb device\n");
 			/* XXX */
 		}
 
@@ -499,7 +507,7 @@ static int __init bb_init(void)
 	return 0;
 
   out_unregister:
-	printk (KERN_WARNING "bb: failed to allocate bb devices\n");
+	dprintk (KERN_WARNING "bb: failed to allocate bb devices\n");
 	unregister_blkdev(bb_major, "bb");
 	return -ENOMEM;
 
@@ -510,7 +518,7 @@ static void __exit bb_exit(void)
 {
 	int i;
 
-	printk (KERN_WARNING "bb: bb_exit entered\n");
+	dprintk (KERN_WARNING "bb: bb_exit entered\n");
 
 	for (i = 0; i < ndevices; i++) {
 		struct bb_device *dev = Devices[i];
@@ -528,15 +536,15 @@ static void __exit bb_exit(void)
 static int bb_open(struct inode *inode, struct file *filp)
 {
 	struct bb_device *bb = inode->i_bdev->bd_disk->private_data;
-	printk(KERN_WARNING "bb: bb_open entered\n");
+	dprintk(KERN_WARNING "bb: bb_open entered\n");
 
 #if 1
 	if (!bb) {
-		printk(KERN_WARNING "bb: bb_open failed\n");
+		dprintk(KERN_WARNING "bb: bb_open failed\n");
 		return 0;
 	}
 #endif
-	printk(KERN_WARNING "bb: bb_open proceeding\n");
+	dprintk(KERN_WARNING "bb: bb_open proceeding\n");
 
 	/* XXX what does filp->private_data do?? 
 	 * It is in sbull
@@ -554,15 +562,15 @@ static int bb_open(struct inode *inode, struct file *filp)
 static int bb_release(struct inode *inode, struct file *file)
 {
 	struct bb_device *bb = inode->i_bdev->bd_disk->private_data;
-	printk(KERN_WARNING "bb: bb_release entered\n");
+	dprintk(KERN_WARNING "bb: bb_release entered\n");
 
 #if 1
 	if (!bb) {
-		printk(KERN_WARNING "bb: bb_open failed\n");
+		dprintk(KERN_WARNING "bb: bb_open failed\n");
 		return 0;
 	}
 #endif
-	printk(KERN_WARNING "bb: bb_release proceeding\n");
+	dprintk(KERN_WARNING "bb: bb_release proceeding\n");
 
 	mutex_lock(&bb->bb_ctl_mutex);
 	--bb->bb_refcnt;
@@ -579,11 +587,11 @@ static int bb_ioctl(struct inode * inode, struct file * file,
 	struct bb_device *bb = inode->i_bdev->bd_disk->private_data;
 	int err;
 
-	printk(KERN_WARNING "bb: bb_ioctl entered\n");
+	dprintk(KERN_WARNING "bb: bb_ioctl entered\n");
 
 #if 1
 	if (!bb) {
-		printk(KERN_WARNING "bb: bb_ioctl failed\n");
+		dprintk(KERN_WARNING "bb: bb_ioctl failed\n");
 		return 0;
 	}
 #endif
@@ -598,7 +606,7 @@ static int bb_ioctl(struct inode * inode, struct file * file,
 		/* XXX err = loop_change_fd(lo, file, inode->i_bdev, arg);*/
 		break;
 	case HDIO_GETGEO:
-		printk(KERN_WARNING "bb: bb_ioctl HDIO_GETGEO\n");
+		dprintk(KERN_WARNING "bb: bb_ioctl HDIO_GETGEO\n");
 		/* XXX hard-coded for sbull */
 		size = nsectors * hardsect_size;
 		size = size*(hardsect_size/KERNEL_SECTOR_SIZE);
@@ -614,7 +622,7 @@ static int bb_ioctl(struct inode * inode, struct file * file,
 		}
 		break;
 	default:
-		printk(KERN_WARNING "bb: bb_ioctl unknown %x failed\n", cmd);
+		dprintk(KERN_WARNING "bb: bb_ioctl unknown %x failed\n", cmd);
 		err = -EINVAL;
 	}
 	mutex_unlock(&bb->bb_ctl_mutex);
@@ -627,14 +635,13 @@ static int bb_make_request(struct request_queue *q, struct bio *bio)
 	struct bb_device *bb = q->queuedata;
 	int status = 0;
 
-	printk(KERN_WARNING "bb: bb_make_request entered\n");
+	dprintk(KERN_WARNING "bb: bb_make_request entered\n");
 
-//	blk_queue_bounce(q,&bio);  // YYY MIKE
 	status = bb_handle_bio(bb, bio);
 
 	bio_endio(bio, bio->bi_size, status);
 
-	printk(KERN_WARNING "bb: bb_make_request exited\n");
+	dprintk(KERN_WARNING "bb: bb_make_request exited\n");
 
 	return status;
 }
@@ -656,7 +663,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		len = bio->bi_size;
 
 		if (len > bb->kbuf_len) {
-			printk(KERN_WARNING "bb: bb_handle_bio bad len\n");
+			dprintk(KERN_WARNING "bb: bb_handle_bio bad len\n");
 			return -EINVAL;
 		}
 
@@ -672,7 +679,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 #endif
 
 		if(!rc) {
-			printk(KERN_WARNING "bb: CACHE_get failed (%s)\n",
+			dprintk(KERN_WARNING "bb: CACHE_get failed (%s)\n",
 			       CACHE_ERROR2STR(bb->ctx->error));
 			return -EINVAL; //different error?
 		}
@@ -694,7 +701,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		len = bio->bi_size;
 
 		if (len > bb->kbuf_len) {
-			printk(KERN_WARNING "bb: bb_handle_bio bad len\n");
+			dprintk(KERN_WARNING "bb: bb_handle_bio bad len\n");
 			return -EINVAL;
 		}
 
@@ -709,7 +716,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
         mutex_unlock(&bb->cache_lock);
 #endif
 		if(!rc) {
-			printk(KERN_WARNING "bb: CACHE_put failed (%s)\n",
+			dprintk(KERN_WARNING "bb: CACHE_put failed (%s)\n",
 			       CACHE_ERROR2STR(bb->ctx->error));
 			return -EINVAL; //different error?
 		}
@@ -776,7 +783,7 @@ static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t
 	int rc;
 	struct bb_underdisk *args = opaque;
 
-    printk(KERN_WARNING "bb_sync_sector_read %p %llx %p %08x\n",opaque,address,data,sz);
+    dprintk(KERN_WARNING "bb_sync_sector_read %p %llx %p %08x\n",opaque,address,data,sz);
 
 	rc = bb_bio_synchronous_readwrite(
 		args->bb,
@@ -796,7 +803,7 @@ static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_
 	int rc;
 	struct bb_underdisk *args = opaque;
 
-    printk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
+    dprintk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
 
 	rc = bb_bio_synchronous_readwrite(
 		args->bb,
@@ -817,7 +824,7 @@ static int bb_bio_readwrite_end_io(struct bio *bio, unsigned int bytes, int stat
     struct bio_readwrite_args* args = (struct bio_readwrite_args*)bio->bi_private;
     int r=0;
 
-    printk(KERN_WARNING "completing bb_bio_synchronous_readwrite\n");
+    dprintk(KERN_WARNING "completing bb_bio_synchronous_readwrite\n");
 
     if(args->old_endio)
         r=args->old_endio(bio,bytes,status); //normal end_io function for map_kern
@@ -842,17 +849,18 @@ static int bb_bio_synchronous_readwrite(
 
 	q = bdev_get_queue(bdev);
 
-    printk(KERN_WARNING "bb_bio_synchronous_readwrite %p %p %p %llx %p %08x %d\n",bb,bdev,q,sector,buf,bytes,isWrite);
+    dprintk(KERN_WARNING "bb_bio_synchronous_readwrite %p %p %p %llx %p %08x %d\n",bb,bdev,q,sector,buf,bytes,isWrite);
 
 	args.c=&c;
 
 	bio_dup = bio_map_kern(q,buf,bytes,GFP_KERNEL); //is GFP_KERNEL ok?
+	//blk_queue_bounce(q,&bio_dup); /* this didnt help */
 
     if(!bio_dup || bio_dup==ERR_PTR(-EINVAL) || IS_ERR(bio_dup)) {
-        printk(KERN_WARNING "bio_map_kern FAILED!\n");
+        dprintk(KERN_WARNING "bio_map_kern FAILED!\n");
         return -1;
     }
-    printk(KERN_WARNING "bio_map_kern success\n");
+    dprintk(KERN_WARNING "bio_map_kern success\n");
 
 	bio_dup->bi_sector = sector; 
 	bio_dup->bi_bdev = bdev; //needed?
@@ -887,22 +895,22 @@ static int bb_xfer_bio(struct bb_device *bb, struct bio *bio)
 	struct request_queue *backing_queue;
 	struct bio *bio_cpy;
 
-	printk(KERN_WARNING "bb: bb_xfer_bio entered\n");
+	dprintk(KERN_WARNING "bb: bb_xfer_bio entered\n");
 
 	if (!bb) {
-		printk(KERN_WARNING "bb: bb_xfer_bio no device\n");
+		dprintk(KERN_WARNING "bb: bb_xfer_bio no device\n");
 		return -EINVAL;
 	}
 
 	if (!bb->bb_backing_queue_a || !bb->bb_backing_queue_b) {
-		printk(KERN_WARNING "bb: bb_xfer_bio no backing queue\n");
+		dprintk(KERN_WARNING "bb: bb_xfer_bio no backing queue\n");
 		return -EINVAL;
 	}
 
 	if (!bb->bb_backing_queue_a->make_request_fn
 	    || !bb->bb_backing_queue_b->make_request_fn)
 	{
-		printk(KERN_WARNING "bb: bb_xfer_bio no backing queue fn\n");
+		dprintk(KERN_WARNING "bb: bb_xfer_bio no backing queue fn\n");
 		return -EINVAL;
 	}
 
@@ -910,7 +918,7 @@ static int bb_xfer_bio(struct bb_device *bb, struct bio *bio)
 
 	backing_queue = bb->bb_backing_queue_a;
 
-	printk(KERN_WARNING "bb: xfr_io seq %d sector %ld len %d seg %d rw %lx\n",
+	dprintk(KERN_WARNING "bb: xfr_io seq %d sector %ld len %d seg %d rw %lx\n",
 	       bb->bb_bio_seq_cnt,
 	       bio->bi_sector,
 	       bio_sectors(bio),
@@ -932,14 +940,14 @@ static int bb_xfer_bio(struct bb_device *bb, struct bio *bio)
 		backing_queue,
 		bio_cpy);
 
-	printk(KERN_WARNING "bb: bb_xfer_bio wait\n");
+	dprintk(KERN_WARNING "bb: bb_xfer_bio wait\n");
 
 	if ((bio->bi_rw & (1 << BIO_RW)) == 0) {
 		/* It's a read */
 		wait_for_completion(&dup_write_complete);
 	}
 
-	printk(KERN_WARNING "bb: bb_xfer_bio exited\n");
+	dprintk(KERN_WARNING "bb: bb_xfer_bio exited\n");
 
 	return 0;
 }
@@ -953,7 +961,7 @@ static int bb_bio_end_io(struct bio *bio, unsigned int bytes, int status)
 	int seq = req->seq;
 	struct request_queue *q;
 
-	printk(KERN_WARNING "bb: end_io seq %d sector %ld len %d seg %d\n",
+	dprintk(KERN_WARNING "bb: end_io seq %d sector %ld len %d seg %d\n",
 	       seq,
 	       bio->bi_sector,
 	       bio_sectors(bio),
@@ -1006,7 +1014,7 @@ static int bb_dup_bio_end_io(struct bio *bio, unsigned int bytes, int status)
 {
 	int seq = 0;
 
-	printk(KERN_WARNING "bb: dup_end_io seq %d sector %ld len %d seg %d\n",
+	dprintk(KERN_WARNING "bb: dup_end_io seq %d sector %ld len %d seg %d\n",
 	       seq,
 	       bio->bi_sector,
 	       bio_sectors(bio),
