@@ -2,6 +2,33 @@
 
 $usage = "usage: <file|loop|ram|real> <primary_dev|filename> [<blocksize> [iter_once]] ";
 
+
+$VERBOSE=0;
+$RANDOM=0;
+while($#ARGV>=0 && $ARGV[0]=~/^\-/) {
+($TYPE=shift @ARGV) || die $usage;
+if($TYPE eq '-v') {
+$VERBOSE=1;
+}
+if($TYPE eq '-r') {
+$RANDOM=1;
+}
+}
+
+sub myshuffle {
+	$n=$#_+1;
+	while($n>0) {
+		$k=int(rand()*$n);
+		$n-=1;
+		$t=$_[$n]; 
+		$_[$n]=$_[$k]; 
+		$_[$k]=$t; 
+	}
+	return @_;	
+}
+srand(time());
+
+
 ($TYPE=shift @ARGV) || die $usage;
 
 $bbdev='';
@@ -17,7 +44,9 @@ $oflags = '';
 
 $write_entire=0;
 
-$SIZE=409600;
+$SIZE=131072*512;
+#$SIZE=1024*1024*1;
+#$SIZE=1024*16;
 $Sk = $SIZE/1024;
 
 ($dev=shift @ARGV) || die $usage;
@@ -56,13 +85,19 @@ print "analyzing...\n";
 $start = 0;
 $max = $SIZE/$bs -1;
 if($once != -1) { $start=$once; $max=$once; }
-for($i=$start;$i<$max+1;$i++)
+
+@bs=(); for($i=$start;$i<$max+1;$i++) { $bs[$i]=$i; }
+if($RANDOM==1) {@bs=myshuffle(@bs);}
+
+foreach(@bs)
 #for($i=$max;$i>=$start;$i--)
 {
+$i = $_;
+#`sleep 1`;
 if($write_entire!=1) {
 	# WRITE ONLY BLOCK
 	`dd if=rfile2 of=$bbdev bs=$bs count=1 skip=$i seek=$i $oflags 2>/dev/null`;
-	`sync`;
+	#`sync`;
 }
 	$good = `dd if=rfile2 bs=$bs count=1 skip=$i 2>/dev/null | md5sum`;
 	$exp = `dd if=$bbdev bs=$bs count=1 skip=$i 2>/dev/null | md5sum`;
@@ -73,5 +108,11 @@ if($write_entire!=1) {
 	if($good eq $exp2) { $pf.='write pass'; } else {$pf.='WRITE FAIL';}
 	$base = $i*$bs;
 	if($pf=~/FAIL/ || ($base&0xffff)==0)
-	{	printf("0x%08x-0x%08x %04d %s\n",$base,$base+$bs, $i, $pf); }
+	{	printf("0x%08x-0x%08x %04d %s\n",$base,$base+$bs, $i, $pf); 
+
+		if($VERBOSE==1) {
+			printf("orig_val: %sread_bbx: %sread_pri: %s",
+				$good,$exp,$exp2);
+		}
+	}
 }

@@ -16,7 +16,8 @@ fi;
 sudo ./ioctl /dev/bb0 /dev/ram0 /dev/ram1 3
 sleep 1
 
-#sudo dd if=/dev/random of=/dev/bb0 bs=512 count=1
-#sudo mkfs.ext2 /dev/bb2
-#sudo mkdir -p ./mnt_bb0 && sudo mount -t ext2 /dev/bb2 ./mnt_bb0
+if [[ $DO_MKFS ]]; then
+sudo mkfs.ext2 /dev/bb0
+sudo mkdir -p ./mnt_bb0 && sudo mount -t ext2 /dev/bb0 ./mnt_bb0
+fi;
 

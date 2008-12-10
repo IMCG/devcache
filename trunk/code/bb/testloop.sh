@@ -25,7 +25,8 @@ sudo losetup /dev/loop6 ./file2
 sudo ./ioctl /dev/bb1 /dev/loop5 /dev/loop6 3
 sleep 1
 
-#sudo dd if=/dev/random of=/dev/bb0 bs=512 count=1
-#sudo mkfs.ext2 /dev/bb2
-#sudo mkdir -p ./mnt_bb0 && sudo mount -t ext2 /dev/bb2 ./mnt_bb0
+if [[ $DO_MKFS ]]; then
+sudo mkfs.ext2 /dev/bb1
+sudo mkdir -p ./mnt_bb1 && sudo mount -t ext2 /dev/bb1 ./mnt_bb1
+fi;
 

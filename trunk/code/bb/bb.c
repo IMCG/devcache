@@ -366,12 +366,13 @@ static int bb_set_fd(struct bb_device *bb,
         memcpy(bb->ctx,&g_CACHE_CTX_TEMPLATE,sizeof(*bb->ctx));
         /* secific initialization */
         /* dev_ops init */
+        bb->ctx->dev_ops.log2_blocksize=3+mylog2(bdev_hardsect_size(bb->bdev_a));
+        bb->ctx->dev_ops.num_blocks=get_capacity(bb->bdev_a->bd_disk)
+		>> (bb->ctx->dev_ops.log2_blocksize-9);
 	#ifdef BB_FORCE_MAX_CAPACITY
-        bb->ctx->dev_ops.num_blocks=2*1024*BB_FORCE_MAX_CAPACITY;
-	#else
-        bb->ctx->dev_ops.num_blocks=get_capacity(bb->bdev_a->bd_disk);
+        if(bb->ctx->dev_ops.num_blocks > 2*1024*BB_FORCE_MAX_CAPACITY)
+		bb->ctx->dev_ops.num_blocks = 2*1024*BB_FORCE_MAX_CAPACITY;
 	#endif
-        bb->ctx->dev_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
         bb->ctx->dev_ops.opaque_data = kzalloc(sizeof(struct bb_underdisk),GFP_KERNEL);
         if(!bb->ctx->dev_ops.opaque_data) {
 	    	dprintk (KERN_WARNING "bb: cant allocate bb->ctx->dev_ops.opaque_data\n");
@@ -388,12 +389,13 @@ static int bb_set_fd(struct bb_device *bb,
 	printk(KERN_WARNING"bb: primary log2_blocksize=%d\n",d->log2_blocksize);
         }
         /* cache_ops init */
+        bb->ctx->cache_ops.log2_blocksize=3+mylog2(bdev_hardsect_size(bb->bdev_b));
+        bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk)
+		>> (bb->ctx->cache_ops.log2_blocksize-9);
 	#ifdef BB_FORCE_MAX_CAPACITY
-        bb->ctx->cache_ops.num_blocks=(2*1024*BB_FORCE_MAX_CAPACITY)>>4;
-	#else
-        bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk);
+        if(bb->ctx->cache_ops.num_blocks > 2*1024*BB_FORCE_MAX_CAPACITY)
+		bb->ctx->cache_ops.num_blocks = 2*1024*BB_FORCE_MAX_CAPACITY;
 	#endif
-        bb->ctx->cache_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_b));
         bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
         if(!bb->ctx->cache_ops.opaque_data) {
 	    	dprintk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
@@ -815,7 +817,7 @@ static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t
 		args->bb,
 		args->bdev,
 		args->q,
-		address>>args->log2_blocksize,
+		address>>9,
 		data,
 		sz,
 		false /* isWrite */
@@ -835,7 +837,7 @@ static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_
 		args->bb,
 		args->bdev,
 		args->q,
-		address>>args->log2_blocksize,
+		address>>9,
 		data,
 		sz,
 		true /* isWrite */
@@ -854,7 +856,7 @@ static int bb_bio_readwrite_end_io(struct bio *bio, unsigned int bytes, int stat
 
     if(args->old_endio)
         r=args->old_endio(bio,bytes,status); //normal end_io function for map_kern
-	complete(args->c);
+	if(args->c) complete(args->c);
     if(r) return r;
 
 	return 0;
@@ -877,10 +879,7 @@ static int bb_bio_synchronous_readwrite(
 	q = bdev_get_queue(bdev);
 
  	hss = bdev_hardsect_size(bdev);
-	printk(KERN_WARNING "bio readwrite hss=%u\n",hss);
-//#ifndef DISABLE_CACHE
-	sector *= hss/512;
-//#endif
+	//printk(KERN_WARNING "bio readwrite hss=%u\n",hss);
 
     //printk(KERN_WARNING "bb_bio_synchronous_readwrite %p %p %p s:%08x buf:%p sz:%08x w?:%d hss:%d\n",bb,bdev,q,sector,buf,bytes,isWrite,hss);
     printk(KERN_WARNING "bb_bio_synchronous_readwrite s:%08x\n",sector);
@@ -889,7 +888,9 @@ static int bb_bio_synchronous_readwrite(
     printk(KERN_WARNING "bb_bio_synchronous_readwrite w:%d\n",(int)isWrite);
     printk(KERN_WARNING "bb_bio_synchronous_readwrite hss:%d\n",hss);
 
-	args.c=&c;
+	args.c=NULL;
+	if(1||!isWrite)
+		args.c=&c;
 
 	bio_dup = bio_map_kern(q,buf,bytes,GFP_KERNEL); //is GFP_KERNEL ok?
 	//blk_queue_bounce(q,&bio_dup); /* this didnt help */
@@ -919,9 +920,9 @@ static int bb_bio_synchronous_readwrite(
 		q,
 		bio_dup);
 
-	wait_for_completion(&c);
-
 	blkdev_issue_flush(bdev,NULL); //this wont complete here, but we dont care
+	if(1||!isWrite) wait_for_completion(&c);
+
 
 
 	return 0;
