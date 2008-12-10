@@ -48,6 +48,10 @@
 #define dprintk(a...)
 #endif
 
+#ifdef BB_NO_OUTPUT
+#define printk(a...)
+#endif
+
 #include <asm/uaccess.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
@@ -148,12 +152,21 @@ static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_
 
 static int bb_sector_alloc(void* arg, ADDRESS* address, size_t sz) {
     struct bb_underdisk* d = (struct bb_underdisk*)arg;
+#ifdef OLD_CODE
 	unsigned long long i=d->next_free_sector;
 	unsigned long long bs = 1ull<< d->log2_blocksize;
+
+	printk(KERN_WARNING "TOP %p %p bb_sector_alloc i: %lld bs: %lld nfs: %lld\n",
+		arg,d,i,bs,d->next_free_sector);
 
 	*address=i;
 	i+=sz*bs;
 	d->next_free_sector = i;
+	printk(KERN_WARNING "BOT %p %p bb_sector_alloc i: %lld bs: %lld nfs: %lld\n",
+		arg,d,i,bs,d->next_free_sector);
+#else
+	*address =(d->next_free_sector++)<<d->log2_blocksize;
+#endif
 	return 0;
 }
 
@@ -302,7 +315,7 @@ static void bb_free(struct bb_device *bb)
 
 	dprintk (KERN_WARNING "bb: bb_free exited\n");
 }
-
+#define mymax(a,b) ((a)>(b)?(a):(b))
 static unsigned int mylog2(unsigned int s)
 {
     int i,j=-1;
@@ -312,15 +325,13 @@ static unsigned int mylog2(unsigned int s)
         {
             if(j!=-1)
             {
-                dprintk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
-                return j;
+                return mymax(j,0);
             }
             j=i;
         }
     }
     if(j<0) j=0;
-    dprintk(KERN_WARNING "mylog2(%d)==%d\n",s,j);
-    return (unsigned int)j;
+    return mymax((unsigned int)j,0);
 }
 
 static int bb_set_fd(struct bb_device *bb,
@@ -339,8 +350,9 @@ static int bb_set_fd(struct bb_device *bb,
 #ifndef DISABLE_CACHE
         // if we already had a cache, destroy it and free memory
         if(bb->ctx) {
-            CACHE_destroy(bb->ctx); //not sure what happends if outstanding async writes!
-            kfree(bb->ctx);
+/* BUGS during free! XXX */
+//            CACHE_destroy(bb->ctx); //not sure what happends if outstanding async writes!
+//            kfree(bb->ctx);
             bb->ctx = NULL;
         }
 
@@ -354,7 +366,11 @@ static int bb_set_fd(struct bb_device *bb,
         memcpy(bb->ctx,&g_CACHE_CTX_TEMPLATE,sizeof(*bb->ctx));
         /* secific initialization */
         /* dev_ops init */
+	#ifdef BB_FORCE_MAX_CAPACITY
+        bb->ctx->dev_ops.num_blocks=2*1024*BB_FORCE_MAX_CAPACITY;
+	#else
         bb->ctx->dev_ops.num_blocks=get_capacity(bb->bdev_a->bd_disk);
+	#endif
         bb->ctx->dev_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
         bb->ctx->dev_ops.opaque_data = kzalloc(sizeof(struct bb_underdisk),GFP_KERNEL);
         if(!bb->ctx->dev_ops.opaque_data) {
@@ -369,9 +385,14 @@ static int bb_set_fd(struct bb_device *bb,
         d->bdev=bb->bdev_a;
         d->q=bb->bb_backing_queue_a;
         d->log2_blocksize=bb->ctx->dev_ops.log2_blocksize;
+	printk(KERN_WARNING"bb: primary log2_blocksize=%d\n",d->log2_blocksize);
         }
         /* cache_ops init */
+	#ifdef BB_FORCE_MAX_CAPACITY
+        bb->ctx->cache_ops.num_blocks=(2*1024*BB_FORCE_MAX_CAPACITY)>>4;
+	#else
         bb->ctx->cache_ops.num_blocks=get_capacity(bb->bdev_b->bd_disk);
+	#endif
         bb->ctx->cache_ops.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_b));
         bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
         if(!bb->ctx->cache_ops.opaque_data) {
@@ -387,6 +408,7 @@ static int bb_set_fd(struct bb_device *bb,
         d->q=bb->bb_backing_queue_b;
         d->next_free_sector=0;
         d->log2_blocksize=bb->ctx->cache_ops.log2_blocksize;
+	printk(KERN_WARNING "bb: cache log2_blocksize=%d\n",d->log2_blocksize);
         }
         if(!CACHE_init(bb->ctx,arg)) // XXX for now, default type, but this should be based on ioctl
         {
@@ -456,9 +478,13 @@ static int bb_set_fd(struct bb_device *bb,
 
 	if (bb->backing_cnt > 1) {
 		blk_queue_hardsect_size(bb->bb_queue, bdev_hardsect_size(bb->bdev_a));
+	#ifdef BB_FORCE_MAX_CAPACITY
+		set_capacity(bb->bb_disk, 2*1024*BB_FORCE_MAX_CAPACITY);
+	#else
 		set_capacity(bb->bb_disk, 
         			get_capacity(bb->bdev_a->bd_disk) *
         			(bdev_hardsect_size(bb->bdev_a)/KERNEL_SECTOR_SIZE));
+	#endif
 
 	}
 
@@ -673,7 +699,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 #ifdef SIMPLE_LOCKS
         mutex_lock(&bb->cache_lock);
 #endif
-		rc = CACHE_get(bb->ctx, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
+		rc = CACHE_get(bb->ctx, ((ADDRESS)sector)<<9, kaddr, len);
 #ifdef SIMPLE_LOCKS
         mutex_unlock(&bb->cache_lock);
 #endif
@@ -689,7 +715,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
         	args.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
-		bb_sync_sector_read(&args, ((ADDRESS)sector)<<args.log2_blocksize, kaddr, len);
+		bb_sync_sector_read(&args, ((ADDRESS)sector)<<9, kaddr, len);
 #endif
 		/* Copy into bio buffer */
 		copykern2bio(bio, kaddr, len);
@@ -711,7 +737,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 #ifdef SIMPLE_LOCKS
         mutex_lock(&bb->cache_lock);
 #endif
-		rc = CACHE_put(bb->ctx, ((ADDRESS)sector)<<bb->ctx->dev_ops.log2_blocksize, kaddr, len);
+		rc = CACHE_put(bb->ctx, ((ADDRESS)sector)<<9, kaddr, len);
 #ifdef SIMPLE_LOCKS
         mutex_unlock(&bb->cache_lock);
 #endif
@@ -726,7 +752,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
         	args.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
-		bb_sync_sector_write(&args, ((ADDRESS)sector)<<args.log2_blocksize, kaddr, len);
+		bb_sync_sector_write(&args, ((ADDRESS)sector)<<9, kaddr, len);
 #endif
 		/* Wait for completion */
 	}
@@ -783,7 +809,7 @@ static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t
 	int rc;
 	struct bb_underdisk *args = opaque;
 
-    dprintk(KERN_WARNING "bb_sync_sector_read %p %llx %p %08x\n",opaque,address,data,sz);
+    printk(KERN_WARNING "bb_sync_sector_read %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
 
 	rc = bb_bio_synchronous_readwrite(
 		args->bb,
@@ -803,7 +829,7 @@ static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_
 	int rc;
 	struct bb_underdisk *args = opaque;
 
-    dprintk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
+    printk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
 
 	rc = bb_bio_synchronous_readwrite(
 		args->bb,
@@ -828,9 +854,9 @@ static int bb_bio_readwrite_end_io(struct bio *bio, unsigned int bytes, int stat
 
     if(args->old_endio)
         r=args->old_endio(bio,bytes,status); //normal end_io function for map_kern
+	complete(args->c);
     if(r) return r;
 
-	complete(args->c);
 	return 0;
 }
 static int bb_bio_synchronous_readwrite(
@@ -845,11 +871,23 @@ static int bb_bio_synchronous_readwrite(
 {
 	struct bio *bio_dup;
 	struct bio_readwrite_args args;
+	unsigned int hss;
 	DECLARE_COMPLETION_ONSTACK(c);  //completion for this request
 
 	q = bdev_get_queue(bdev);
 
-    dprintk(KERN_WARNING "bb_bio_synchronous_readwrite %p %p %p %llx %p %08x %d\n",bb,bdev,q,sector,buf,bytes,isWrite);
+ 	hss = bdev_hardsect_size(bdev);
+	printk(KERN_WARNING "bio readwrite hss=%u\n",hss);
+//#ifndef DISABLE_CACHE
+	sector *= hss/512;
+//#endif
+
+    //printk(KERN_WARNING "bb_bio_synchronous_readwrite %p %p %p s:%08x buf:%p sz:%08x w?:%d hss:%d\n",bb,bdev,q,sector,buf,bytes,isWrite,hss);
+    printk(KERN_WARNING "bb_bio_synchronous_readwrite s:%08x\n",sector);
+    printk(KERN_WARNING "bb_bio_synchronous_readwrite buf:%p\n",buf);
+    printk(KERN_WARNING "bb_bio_synchronous_readwrite sz:%08x\n",bytes);
+    printk(KERN_WARNING "bb_bio_synchronous_readwrite w:%d\n",(int)isWrite);
+    printk(KERN_WARNING "bb_bio_synchronous_readwrite hss:%d\n",hss);
 
 	args.c=&c;
 
@@ -882,6 +920,9 @@ static int bb_bio_synchronous_readwrite(
 		bio_dup);
 
 	wait_for_completion(&c);
+
+	blkdev_issue_flush(bdev,NULL); //this wont complete here, but we dont care
+
 
 	return 0;
 }
