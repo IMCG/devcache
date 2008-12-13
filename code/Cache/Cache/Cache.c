@@ -27,9 +27,9 @@
 #define DEBUG
 #endif
 #ifdef DEBUG
-#define DBGL(l,x) if(DEBUGLEVEL&l) x
-#define DBG(x) DBGL(128,x)
-#define dprintf(a...) printf(a)
+#define DBGL(l,x) if(DEBUGLEVEL&l) {x}
+#define DBG(x...) DBGL(128,x)
+#define dprintf printf
 #else
 #define DBG(x)
 #define DBGL(l,x)
@@ -232,7 +232,7 @@ typedef struct cache_imp_st
 
 BOOL cache_imp_init(cache_imp* cache, unsigned long long sz, cache_imp_cachetype cache_type)
 {
-	DBGL(2,{dprintf("cache_imp_init: sz:0x%08llx type:%d\n",sz,cache_type);})
+	DBGL(2,{ dprintf("cache_imp_init: sz:0x%08llx type:%d\n",sz,cache_type); })
 
 	/* initialize the hash table with buckets */
 	hash_table_init(&(cache->hash), sz>(1<<10)?(1<<10):(unsigned int)sz, NULL);
@@ -511,7 +511,7 @@ evict_restart:
 	{
 		cache_node* node = list_entry(pos,cache_node,access_list);
 		if(!node) return FALSE;
-		generic_mutex_lock(&node->lock);
+		generic_mutex_lock(&node->lock); // XXX lock issue?
 		if(&node->access_list!=cache->list.next) goto evict_restart; //evictee has been moved
 		if(!cache_imp_remove(cache,node)) return FALSE;
 		cache->size-=1;
@@ -636,7 +636,7 @@ BOOL CACHEi_MakeCacheNode(PCACHE_ICTX ictx, cached_data** cdata, BOOL* gotEvicte
 	return TRUE;
 }
 
-int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut, BOOL isThru)
+int WNWT_getput_diskblock_OLD(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut, BOOL isThru)
 {
 	BOOL rtn;
 	cache_imp* cache = (cache_imp*)ictx->data;
@@ -878,6 +878,406 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
 			{
 				generic_mutex_unlock(&mdataptr->lock);
 				/*	insert cache entry */
+				if(!cache_reinsert_node(cache,&addr,&mdataptr->cnode))
+				{
+					if(abuf) ictx->ctx->mem_ops.free(abuf);
+					return -1;
+				}
+			}
+		}
+
+	}
+	return TRUE;
+}
+
+
+#define DEV_PRIMARY 0
+#define DEV_CACHE 1
+#define DEV_READ 0
+#define DEV_WRITE 1
+#define DEV_ALLOC 2
+inline int DevOp(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, void* data, int op)
+{
+    unsigned int i,num_ops;
+    unsigned int blocksize;
+
+    printf("DevOp: %p %s %p=%08llx %d %p %d\n",ictx,device==DEV_PRIMARY?"PRIMARY":"CACHE",addr,*addr,bytelen,data,op);
+
+    CACHE_DEVOPS* ops;
+    if(device==DEV_PRIMARY)
+	 ops = &ictx->ctx->dev_ops;
+    if(device==DEV_CACHE)
+	 ops = &ictx->ctx->cache_ops;
+
+	num_ops = bytelen>>ops->log2_blocksize; // assumes bytelen is multiple of blocksize
+	blocksize = (1<<ops->log2_blocksize);
+
+    if(num_ops < 1 && op!=DEV_ALLOC) //return -1; //error must read/write/alloc full blocks
+    {
+        /* will need to malloc space and memcpy (this is slow!) */
+        /* for read and write */
+        {
+            void* block = cache_malloc(blocksize);
+            if(!block) return -2;
+        	if(0!=ops->read(ops->opaque_data,*addr,block,blocksize)) {
+                cache_free(block);
+                return -1;
+            }
+            if(op==DEV_READ)
+            {
+                memcpy(data,block,bytelen);
+            }
+            else
+            {
+                memcpy(block,data,bytelen);
+        	    if(0!=ops->write(ops->opaque_data,*addr,block,blocksize)) {
+                    cache_free(block);
+                    return -1;
+                }
+            }
+            cache_free(block);
+            return 0;
+        }
+    }
+
+    for(i=0;i<num_ops;++i) {
+        if(op==DEV_READ)
+        	if(0!=ops->read(ops->opaque_data,*addr+i*blocksize,data+i*blocksize,blocksize)) return -1;
+        if(op==DEV_WRITE)
+        	if(0!=ops->write(ops->opaque_data,*addr+i*blocksize,data+i*blocksize,blocksize)) return -1;
+    }
+    /* special case with ALLOC.
+     *  expected to allocate contiguous multiblock segments */
+        if(op==DEV_ALLOC) {
+            size_t allocsz = (bytelen+(blocksize-1))/blocksize; //round up
+        	if(0!=ops->alloc(ops->opaque_data,addr,allocsz)) return -1;
+
+        }
+
+    return 0;
+}
+
+int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut, BOOL isThru)
+{
+	BOOL rtn=TRUE;
+	cache_imp* cache = (cache_imp*)ictx->data;
+	size_t devByteCnt = 1<<ictx->ctx->dev_ops.log2_blocksize;
+	size_t cacheByteCnt = 1<<ictx->ctx->cache_ops.log2_blocksize;
+	cached_data *mdataptr=NULL;
+	cache_node* cnode;
+	int i;
+	int num_cache_ops;
+	BOOL cleaningDirtyNode=FALSE;
+	BOOL hitOrDirty=FALSE;
+
+	DBG({dprintf("WNWT_getput_diskblock: addr:0x%08llx %s %s\n",addr,isPut?"WRITE":"READ",isThru?"THRU":"NONE");})
+
+	/* check cache */
+
+	/* calc num cacheops.read equal to disk blocksize / cache blocksize */
+	num_cache_ops = 1;
+	if(ictx->ctx->dev_ops.log2_blocksize > ictx->ctx->cache_ops.log2_blocksize)
+	{
+		num_cache_ops = (1<<(ictx->ctx->dev_ops.log2_blocksize-ictx->ctx->cache_ops.log2_blocksize));
+	}
+	else
+	{
+		/* make cacheReadCnt the smaller value */
+		cacheByteCnt = devByteCnt;
+	}
+
+	DBG({dprintf("\t num_cache_ops:0x%02x devReadCnt:0x%08x cacheReadCnt:0x%08x\n",num_cache_ops,devByteCnt,cacheByteCnt);})
+
+
+	/* look for address in internal cache */
+	if(cache_retrieve_node(cache, &addr, &cnode))
+	{
+		mdataptr = cache_entry(cnode, cached_data, cnode);
+		generic_mutex_lock(&mdataptr->lock); // lock if we get it
+		if((void*)mdataptr->p == (void*)-1)
+		{
+			cleaningDirtyNode=TRUE;
+		}
+
+		hitOrDirty=TRUE;
+		DBGL(1,{dprintf("\t cache %s: cnode:%p\n",cleaningDirtyNode?"DIRTY":"HIT",cnode);})
+	}
+	
+
+	if(!hitOrDirty) /* if MISS */
+	{
+		BOOL gotEvictee;
+        /* new node */
+		if(!CACHEi_MakeCacheNode(ictx, &mdataptr, &gotEvictee) || mdataptr==NULL)
+		{
+	        DBG({dprintf("WNWT_getput_diskblock: MakeCacheNode failed\n");})
+			return FALSE;
+		}
+		generic_mutex_lock(&mdataptr->lock); // lock if we make it
+			
+		if(!gotEvictee)
+		{
+			/* allocate cachedev blocks */
+   			if(0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, cacheByteCnt*num_cache_ops, data, DEV_ALLOC))
+			{
+				if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+	            DBG({dprintf("DevOp (alloc cachedev blocks) FAILED\n");})
+				return FALSE;
+			}
+			DBG({dprintf("\t allocated cache_dev block @ 0x%08llx\n",mdataptr->addr);})
+		}
+
+
+        /* if read, make dirty true to reuse code path */
+        if(!isPut) cleaningDirtyNode=TRUE;
+    }
+
+    /* reading */
+    if(!isPut)
+    {
+        /* dirty (or new miss) */
+        if(cleaningDirtyNode)
+        {
+            /* read primary */
+            if(0!=DevOp(ictx, DEV_PRIMARY, &addr, devByteCnt, data, DEV_READ))
+            {
+	            DBG({dprintf("DevOp (read primary) FAILED\n");})
+                rtn = FALSE;
+            }
+            /* write cache */
+            if(0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_WRITE))
+            {
+	            DBG({dprintf("DevOp (write cache) FAILED\n");})
+                rtn = FALSE;
+            }
+        }
+        else /* valid hit */
+        {
+            /* read cache */
+            if(0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_READ))
+            {
+	            DBG({dprintf("DevOp (write cache) FAILED\n");})
+                rtn = FALSE;
+            }
+        }
+    }
+    else /* writing */
+    {
+        if(!isThru) /* write none */
+        {
+            /* mark dirty */
+		    mdataptr->p = (void*)-1;
+        }
+        else /* write thru */
+        {
+            /* if async support should do it here */
+            if(0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_WRITE))
+            {
+                /* failed badly */
+	            DBG({dprintf("DevOp (write primary) FAILED\n");})
+                rtn=FALSE;
+            }
+            
+        }
+
+        /* write primary (this can always be synchronous, or async and never wayt to complete, assuming back-end keeps consistency) */
+        if(0!=DevOp(ictx, DEV_PRIMARY, &addr, devByteCnt, data, DEV_WRITE))
+        {
+            DBG({dprintf("DevOp (write primary) FAILED\n");})
+            rtn = FALSE;
+        }
+
+        /* if cache async write support, complete here */
+        
+    }
+
+   	generic_mutex_unlock(&mdataptr->lock); //unlock since it's been held since retrieval/creation
+
+    if(!hitOrDirty) /* was new node */
+	{
+        /* insert cache entry */
+       	if(!cache_insert_node(cache,&addr,&mdataptr->cnode))
+        	{
+    			if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+	            DBG({dprintf("cache_insert_node FAILED\n");})
+    			return FALSE;
+    	}
+    }
+    else /* old nodes need touch and release node */
+    {
+        if(!cache_touch_node(cache, &mdataptr->cnode))
+        {
+            DBG({dprintf("cache_touch_node FAILED\n");})
+            return FALSE;
+        }
+      	if(!cache_release_node(cache, &mdataptr->cnode))
+        {
+            DBG({dprintf("cache_release_node FAILED\n");})
+            return FALSE;
+        }
+    }
+
+	return rtn;
+
+}
+
+#ifdef  OLD_READWRITEBLOCK_CODE
+
+// FIX, check locking of mdataptr->p when async writing frees pointer
+#if 0 //NO ASYNC yet
+		if(ictx->ctx->cache_ops.supportsAsync && mdataptr->p)
+		{
+			if(isPut)
+			{
+				/* write to (previously allocated) temp storage while async write is pending */
+				memcpy(mdataptr->p,data,num_reads*cacheReadCnt);
+			}
+			else
+			{
+				/* read from temp storage while async write is pending */
+				memcpy(data,mdataptr->p,num_reads*cacheReadCnt);
+			}
+			rtn=TRUE;
+		}
+		else
+#endif
+
+		if(!rtn)
+		{
+			/* read from cache disk failed, remove from cache structure */
+			cache_imp_remove(cache,cnode);//not locked but calls del_entry_safe so should be ok?
+			//continue to get from disk
+		}
+		else
+		{
+			generic_mutex_unlock(&mdataptr->lock);
+			if(!cache_touch_node(cache, cnode)) return -1;
+			if(!cache_release_node(cache, cnode)) return -1;
+			return rtn;
+		}
+	}
+
+	/* else: do (reads from disk OR write to disk) and put in cache */
+	if(!hitOrDirty) DBGL(1,{dprintf("\t cache MISS (or error on hit)\n");})
+
+	{
+		if(!isPut)
+		{
+			/* read from disk */
+			if(0!=ictx->ctx->dev_ops.read(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
+					return FALSE;
+			}
+		}
+
+		/* add to cache / write to cache dev */
+		{
+			BOOL gotEvictee;
+			BYTE* abuf=NULL;
+
+			if(!cleaningDirtyNode)
+			{
+				if(!CACHEi_MakeCacheNode(ictx, &mdataptr, &gotEvictee))
+				{
+					return -1;
+				}
+			
+				if(!gotEvictee)
+				{
+					/* allocate cachedev blocks */
+					if(0!=ictx->ctx->cache_ops.alloc(ictx->ctx->cache_ops.opaque_data,&mdataptr->addr,num_reads))
+					{
+						if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+						return FALSE;
+					}
+					DBG({dprintf("\t allocated cache_dev block @ 0x%08llx\n",mdataptr->addr);})
+
+				}
+			}
+
+			if(ictx->ctx->cache_ops.supportsAsync)
+			{
+				/* copy data to async buffer */
+				abuf = ictx->ctx->mem_ops.malloc(num_reads*cacheReadCnt);
+				if(!abuf) 
+				{	
+					generic_mutex_unlock(&mdataptr->lock);
+					return -1;
+				}
+				memcpy(abuf,data,num_reads*cacheReadCnt);
+
+				/* alter entry to include async buffer */
+				mdataptr->p=abuf;
+				
+				/* post async cache_ops.write */
+				{
+					WN_cache_asyncwrite_callback_data* cbdata = ictx->ctx->mem_ops.malloc(sizeof(WN_cache_asyncwrite_callback_data));
+					if(!cbdata)
+					{	
+						generic_mutex_unlock(&mdataptr->lock);
+						return -1;
+					}
+
+					cbdata->ictx=ictx;
+					cbdata->mdataptr=mdataptr;
+					generic_atomic_init(num_reads, &cbdata->sem_cnt);
+					for(i=0;i<num_reads;++i)
+					{
+						if(0!=ictx->ctx->cache_ops.asyncwrite(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,mdataptr->p+i*cacheReadCnt,cacheReadCnt,cbdata,WN_cache_asyncwrite_callback))
+						{
+							ictx->ctx->mem_ops.free(abuf);
+							if(!gotEvictee && mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+							if(i==0)
+							{
+								ictx->ctx->mem_ops.free(cbdata);
+							}
+							else /* should decrement sem_cnt (num_reads-i) times */
+							{
+								int j;
+								for(j=0;j<(num_reads-i);++j)
+									generic_atomic_dec_and_test(&cbdata->sem_cnt);
+							}
+							generic_mutex_unlock(&mdataptr->lock);
+							return -1;
+						}
+					}
+				}
+			}
+			else
+			{
+				/* do sync writes */
+				for(i=0;i<num_reads;++i)
+				{
+					if(0!=ictx->ctx->cache_ops.write(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,data+i*cacheReadCnt,cacheReadCnt)) {
+							rtn = ictx->ctx->cache_ops.free(ictx->ctx->cache_ops.opaque_data,mdataptr->addr,num_reads);
+							if(!gotEvictee && mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+							return -1;
+					}
+				}
+			}	
+
+        /* cache miss, write to primary disk (async write to cache started already) */
+    		if(isPut)
+    		{
+    			/* write to disk */
+    			if(0!=ictx->ctx->dev_ops.write(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
+    					return FALSE;
+    			}
+    		}
+		
+			if(!cleaningDirtyNode && !gotEvictee)
+			{
+				/* insert cache entry */
+				if(!cache_insert_node(cache,&addr,&mdataptr->cnode))
+				{
+					if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+					if(abuf) ictx->ctx->mem_ops.free(abuf);
+					return -1;
+				}
+			}
+			else
+			{
+				generic_mutex_unlock(&mdataptr->lock);
+				/*	insert cache entry */
 				if(!cache_reinsert_node(cache,&addr,cnode))
 				{
 					if(abuf) ictx->ctx->mem_ops.free(abuf);
@@ -889,6 +1289,8 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
 	}
 	return TRUE;
 }
+
+#endif /* OLD_READWRITEBLOCK_CODE */
 
 #define WN_put_diskblock( ictx,  addr,  data) \
     WNWT_getput_diskblock(ictx,addr,data,TRUE,FALSE)
@@ -903,70 +1305,99 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
     WN_get_diskblock( ictx, addr, data)
 
 
-#define TEMPLATE_getput(thetype,diskblock)\
+#define TEMPLATE_get(thetype,diskblock)\
+ TEMPLATE_getput(thetype,diskblock,0)
+#define TEMPLATE_put(thetype,diskblock)\
+ TEMPLATE_getput(thetype,diskblock,1)
+
+#define TEMPLATE_getput(thetype,diskblock,isWrite)\
 \
 BOOL thetype(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz) \
 { \
-	size_t i,startblock; \
+	size_t i; \
 	size_t bs = (1ull<<ictx->ctx->dev_ops.log2_blocksize); \
-	ADDRESS base; \
-	size_t offset; \
-	offset = ((size_t)addr) & (bs-1); \
-	base = addr & ~((ADDRESS)(bs-1)); \
-	startblock=0; \
+	size_t l2bs = ictx->ctx->dev_ops.log2_blocksize; \
+	ADDRESS startpage = addr & ~((ADDRESS)(bs-1)); \
+	size_t startoffset = ((size_t)addr) & (bs-1); \
+    ADDRESS endpage = (addr+(sz-1)) & ~((ADDRESS)(bs-1)); \
+	size_t endoffset = ((size_t)(addr+(sz-1))) & (bs-1); \
+	size_t exendoffset = ((size_t)(addr+(sz))) & (bs-1); \
+/*    int fullblocks = (endpage/bs)-(startpage/bs)+1 \
+         - (startoffset?1:0) - (exendoffset?1:0); \ */ \
+    int startfpage = (startpage>>l2bs)+(startoffset?1:0); \
+    int endfpage = (endpage>>l2bs)-(exendoffset?1:0); \
+    int fullblocks = endfpage-startfpage+1; \
+    size_t startblock=0;\
+    ADDRESS base=startpage; \
+    /* fullblocks might be negative after initial calc */ \
+    if(fullblocks<0) fullblocks=0; \
 \
 	DBG({dprintf( #thetype ": addr:0x%08llx\n",addr);}) \
 \
-	if(offset!=0) \
+	if(startoffset!=0) \
 	{ \
 		size_t toCopy; \
 		BYTE* buf = (BYTE*)cache_malloc(bs); \
 		if(!buf) return FALSE; \
+        DBG({dprintf("offset=%d calling early diskblock(FALSE,FALSE)\nbase:%08llx buf:%p",startoffset,startpage,buf);}) \
 		if(0==WNWT_getput_diskblock(ictx,base,buf,FALSE,FALSE)) \
 		{ \
 			cache_free(buf); \
 			return FALSE; \
 		} \
-		toCopy = bs-offset>sz?sz:bs-offset; \
-		memcpy(buf+offset,data,toCopy); \
-		if(0==diskblock(ictx,base,buf)) \
-		{ \
-			cache_free(buf); \
-			return FALSE; \
-		} \
+		toCopy = bs-startoffset>sz?sz:bs-startoffset; \
+        if(isWrite) {\
+		    memcpy(buf+startoffset,data,toCopy); \
+            DBG({dprintf("offset=%d calling early diskblock Write " #diskblock "\n",startoffset);}) \
+    		if(0==diskblock(ictx,base,buf)) \
+    		{ \
+    			cache_free(buf); \
+    			return FALSE; \
+    		} \
+        }\
+        else\
+            memcpy(data,buf+startoffset,toCopy);\
 		cache_free(buf); \
-		startblock=bs; \
+		startblock=1; \
 		sz-=toCopy; \
 	} \
-	for(i=startblock;(i+bs)<=sz;i+=bs) \
+	for(i=startblock*bs;fullblocks>0;i+=bs,--fullblocks) \
 	{ \
-		if(0==diskblock(ictx,base+i,data-offset+i)) return FALSE; \
+        DBG({dprintf("i=%u sz=%d fullblocks=%u calling normal " #diskblock "()\n",i,sz,fullblocks);})\
+		if(0==diskblock(ictx,base+i,data-startoffset+i)) return FALSE; \
+        sz-=bs; \
 	} \
-	if(sz>i) \
+	if(exendoffset!=0 && sz>0) \
 	{ \
 		BYTE* buf = (BYTE*)cache_malloc(bs); \
 		if(!buf) return FALSE; \
+        DBG({dprintf("i=%d sz=%d eoff=%d calling late diskblock(FALSE,FALSE)\n",i,sz,exendoffset);})\
 		if(0==WNWT_getput_diskblock(ictx,base+i,buf,FALSE,FALSE)) \
 		{ \
 			cache_free(buf); \
 			return FALSE; \
 		} \
-		memcpy(buf,data-offset+i,sz-i); \
-		if(0==diskblock(ictx,base+i,buf)) \
-		{ \
-			cache_free(buf); \
-			return FALSE; \
-		} \
+        if(isWrite) {\
+		    memcpy(buf,data-startoffset+i,exendoffset); \
+            DBG({dprintf("offset=%d calling late diskblock Write " #diskblock "\n",exendoffset);}) \
+    		if(0==diskblock(ictx,base,buf)) \
+    		{ \
+    			cache_free(buf); \
+    			return FALSE; \
+    		} \
+        }\
+        else\
+            memcpy(data-startoffset+i,buf,exendoffset);\
 		cache_free(buf); \
 	} \
 	return TRUE; \
 }\
 
 
-TEMPLATE_getput(WN_get,WN_get_diskblock)
-TEMPLATE_getput(WN_put,WN_put_diskblock)
-TEMPLATE_getput(WT_get,WT_get_diskblock)
-TEMPLATE_getput(WT_put,WT_put_diskblock)
+TEMPLATE_get(WN_get,WN_get_diskblock)
+TEMPLATE_put(WN_put,WN_put_diskblock)
+TEMPLATE_get(WT_get,WT_get_diskblock)
+TEMPLATE_put(WT_put,WT_put_diskblock)
 
 
 /*
@@ -1215,6 +1646,7 @@ BOOL CACHE_put(PCACHE_CTX ctx, ADDRESS addr, BYTE* data, size_t sz)
 /* /exposed api */
 
 
+#ifndef __KERNEL__
 /* testing */
 //////////////////////////////////////////////////////////////////////
 
@@ -1288,9 +1720,10 @@ int mdisk_alloc(void* arg, ADDRESS* address, size_t sz) {
 	//((pbuffer)arg)->numblocks
 	unsigned long long i=((pbuffer)arg)->allocated;
 	unsigned long long bs = 1ull<< ((pbuffer)arg)->log2_blocksize;
-	DBG({dprintf("mdisk_alloc arg:%p ret:%llx\n",arg,i);})
+	DBG({dprintf("mdisk_alloc arg:%p ret:%llx sz:%x\n",arg,i,sz);})
 
 	*address=i;
+//    sz = (sz+(bs-1))/bs; //round up num of blocks
 	i+=sz*bs;
 	((pbuffer)arg)->allocated=i;
 	return 0;
@@ -1338,7 +1771,6 @@ void test_store_int(CACHE_CTX* ctx,int iaddr)
 	}
 }
 
-#ifndef __KERNEL__
 int test1(int argc, char* argv[])
 {
 	return 0;
@@ -1418,8 +1850,8 @@ int main(int argc, char* argv[])
 			&cache_buf,
 			cache_disk_log2_blocksize,
 			cache_disk_numblocks,
-			TRUE,
-			mdisk_asyncwrite
+			FALSE,//TRUE,
+			NULL,//mdisk_asyncwrite
 		},
 		0,0
 	};
@@ -1458,7 +1890,57 @@ int main(int argc, char* argv[])
 	};
 #endif
 
+    { /* printf testing! */
+	DBG({dprintf("TEST: dprintf inside DBG\n");})
+	DBGL(1,{dprintf("TEST: dprintf inside DBGL(1)\n");})
+	dprintf("TEST: dprintf only\n");
+    printf("TEST: printf only DEBUGLEVEL=%d\n",DEBUGLEVEL);
+    }
 
+    /* aligned normal-sized simple put/get test */
+	{
+		BOOL rtn = CACHE_init(&ctx,0);
+		cache_buf.allocated=0;
+		printf("CACHE_init: %d error: %s\n",rtn,CACHE_ERROR2STR(ctx.error));
+		if(!rtn) exit(0);
+	}
+
+	{
+		unsigned int i;
+		BYTE str[0x10] = "0123456789HELLO";
+        BYTE* buf;
+		size_t bufsz = 1<<ctx.dev_ops.log2_blocksize;
+		BOOL rtn;
+        buf = malloc(bufsz);
+        if(!buf) { printf("ERROR: malloc ctx.dev_ops.log2_blocksize=%d FAILED\n",ctx.dev_ops.log2_blocksize); return -1;}
+        memcpy(buf,str,strlen(str));
+		for(i=0;i<1;i+=0x1) {
+			ADDRESS addr = {i};
+//			*(unsigned int*)buf=i;
+			rtn = CACHE_put(&ctx,addr+i*ctx.dev_ops.log2_blocksize,buf,bufsz);
+			printf("CACHE_put: %d error: %s\n",rtn,CACHE_ERROR2STR(ctx.error));
+		}
+        free(buf);
+	}
+
+	t1=clock();
+	{
+		size_t bufsz = 1<<ctx.dev_ops.log2_blocksize;
+        BYTE* buf = malloc(bufsz);
+        if(!buf) { printf("ERROR: malloc ctx.dev_ops.log2_blocksize=%d FAILED\n",ctx.dev_ops.log2_blocksize); return -1;}
+		ADDRESS addr = {0};
+		BOOL rtn = CACHE_get(&ctx,addr,buf,bufsz);
+		printf("CACHE_get: %d error: %s\n",rtn,CACHE_ERROR2STR(ctx.error));
+		printf("buf = %s\n",buf);
+        if(strcmp(buf,"0123456789HELLO")!=0) {
+            printf("FATAL CACHE ERROR on REALLY simple put/get!!!\n");
+            exit(-1);
+        } else
+            printf("CACHE GOOD on REALLY simple put/get!!!\n");
+        free(buf);
+	}
+
+    /* unaligned wierd sized, orginal test 1 */
 	{
 		BOOL rtn = CACHE_init(&ctx,0);
 		cache_buf.allocated=0;
@@ -1488,6 +1970,10 @@ int main(int argc, char* argv[])
 		BOOL rtn = CACHE_get(&ctx,addr,buf,bufsz);
 		printf("CACHE_get: %d error: %s\n",rtn,CACHE_ERROR2STR(ctx.error));
 		printf("buf = %s\n",buf);
+        if(strcmp(buf,"HELLO")!=0) {
+            printf("FATAL CACHE ERROR on simple put/get!!!\n");
+            exit(-1);
+        }
 	}
 	t2=clock();
 	printf("t diff: 0x%08x / 0x%08x\n",(unsigned int)(t2-t1),(unsigned int)CLOCKS_PER_SEC);

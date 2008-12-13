@@ -165,7 +165,8 @@ static int bb_sector_alloc(void* arg, ADDRESS* address, size_t sz) {
 	printk(KERN_WARNING "BOT %p %p bb_sector_alloc i: %lld bs: %lld nfs: %lld\n",
 		arg,d,i,bs,d->next_free_sector);
 #else
-	*address =(d->next_free_sector++)<<d->log2_blocksize;
+	*address =(d->next_free_sector)<<d->log2_blocksize;
+    d->next_free_sector+=sz;
 #endif
 	return 0;
 }
@@ -484,8 +485,7 @@ static int bb_set_fd(struct bb_device *bb,
 		set_capacity(bb->bb_disk, 2*1024*BB_FORCE_MAX_CAPACITY);
 	#else
 		set_capacity(bb->bb_disk, 
-        			get_capacity(bb->bdev_a->bd_disk) *
-        			(bdev_hardsect_size(bb->bdev_a)/KERNEL_SECTOR_SIZE));
+        			get_capacity(bb->bdev_a->bd_disk);
 	#endif
 
 	}
