@@ -485,7 +485,7 @@ static int bb_set_fd(struct bb_device *bb,
 		set_capacity(bb->bb_disk, 2*1024*BB_FORCE_MAX_CAPACITY);
 	#else
 		set_capacity(bb->bb_disk, 
-        			get_capacity(bb->bdev_a->bd_disk);
+        			get_capacity(bb->bdev_a->bd_disk));
 	#endif
 
 	}
