@@ -201,9 +201,14 @@ static CACHE_CTX g_CACHE_CTX_TEMPLATE = {
 			9,//cache_disk_log2_blocksize, /* ALWAYS 512 */
 			0,//cache_disk_numblocks,
 			FALSE,//TRUE,
-			NULL,//mdisk_asyncwrite
+			NULL//mdisk_asyncwrite
 		},
 		0,0
+#ifdef TRY_NO_DOUBLEBUFFER
+,1 /* set object interface */
+#else
+,0 /* normal (old) buffer interface */
+#endif
 	};
 
 /* END -------------- Cache glue ------------------------- */
@@ -684,9 +689,11 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 	unsigned char *kaddr;
 	unsigned int len;
 	sector_t sector;
+    void * obj;
 
 	if ((bio->bi_rw & (1 << BIO_RW)) == 0) {
 		/* Read */
+#ifndef TRY_NO_DOUBLEBUFFER
 		kaddr = bb->kbuf;
 		len = bio->bi_size;
 
@@ -694,14 +701,18 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 			dprintk(KERN_WARNING "bb: bb_handle_bio bad len\n");
 			return -EINVAL;
 		}
-
+        obj = kaddr;
+#else
+        obj = bio;
+        len = bio->bi_size;
+#endif /* TRY_NO_DOUBLE_BUFFER */
 		sector = bio->bi_sector;
 
 #ifndef DISABLE_CACHE
 #ifdef SIMPLE_LOCKS
         mutex_lock(&bb->cache_lock);
 #endif
-		rc = CACHE_get(bb->ctx, ((ADDRESS)sector)<<9, kaddr, len);
+		rc = CACHE_get(bb->ctx, ((ADDRESS)sector)<<9, obj, len);
 #ifdef SIMPLE_LOCKS
         mutex_unlock(&bb->cache_lock);
 #endif
@@ -719,12 +730,16 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
         	args.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
 		bb_sync_sector_read(&args, ((ADDRESS)sector)<<9, kaddr, len);
 #endif
+
+#ifndef TRY_NO_DOUBLEBUFFER
 		/* Copy into bio buffer */
 		copykern2bio(bio, kaddr, len);
 	    	/* Wait for completion */
+#endif
 	}
 	else {
 		/* Write */
+#ifndef TRY_NO_DOUBLEBUFFER
 		kaddr = bb->kbuf;
 		len = bio->bi_size;
 
@@ -733,13 +748,19 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 			return -EINVAL;
 		}
 
-		sector = bio->bi_sector;
 		copybio2kern(bio, kaddr, len);
+        obj = kaddr;
+#else
+        obj = bio;
+        len = bio->bi_size;
+#endif /* TRY_NO_DOUBLEBUFFER */
+
+		sector = bio->bi_sector;
 #ifndef DISABLE_CACHE
 #ifdef SIMPLE_LOCKS
         mutex_lock(&bb->cache_lock);
 #endif
-		rc = CACHE_put(bb->ctx, ((ADDRESS)sector)<<9, kaddr, len);
+		rc = CACHE_put(bb->ctx, ((ADDRESS)sector)<<9, obj, len);
 #ifdef SIMPLE_LOCKS
         mutex_unlock(&bb->cache_lock);
 #endif
@@ -892,6 +913,7 @@ static int bb_bio_synchronous_readwrite(
 	if(1||!isWrite)
 		args.c=&c;
 
+#ifndef TRY_NO_DOUBLEBUFFER
 	bio_dup = bio_map_kern(q,buf,bytes,GFP_KERNEL); //is GFP_KERNEL ok?
 	//blk_queue_bounce(q,&bio_dup); /* this didnt help */
 
@@ -900,6 +922,40 @@ static int bb_bio_synchronous_readwrite(
         return -1;
     }
     dprintk(KERN_WARNING "bio_map_kern success\n");
+
+	args.old_endio = bio_dup->bi_end_io;
+#else
+    {
+        /* buf is really the original bio YYY */
+#if 0
+	bio_dup = bio_alloc(GFP_KERNEL, 1); //is 1 page correct???
+    // is there a default endio? ... if not need to make one and bio_put
+
+    if(!bio_dup || bio_dup==ERR_PTR(-EINVAL) || IS_ERR(bio_dup)) {
+        dprintk(KERN_WARNING "bio_alloc  FAILED!\n");
+        return -1;
+    }
+	bio_init(bio_dup);
+
+	memcpy(bio_dup->bi_io_vec,
+	       bio->bi_io_vec,
+	       bio->bi_max_vecs * sizeof(struct bio_vec));
+
+	bio_dup->bi_vcnt = bio->bi_vcnt;
+	bio_dup->bi_size = bytes;
+	bio_dup->bi_idx = bio->bi_idx;
+#else
+    bio_dup = bio_clone((struct bio*)buf,GFP_KERNEL);
+    if(!bio_dup || bio_dup==ERR_PTR(-EINVAL) || IS_ERR(bio_dup)) {
+        dprintk(KERN_WARNING "bio_clone  FAILED!\n");
+        return -1;
+    }
+#endif
+	args.old_endio = NULL;
+	bio_phys_segments(q, bio_dup);
+	bio_hw_segments(q, bio_dup);
+    }
+#endif
 
 	bio_dup->bi_sector = sector; 
 	bio_dup->bi_bdev = bdev; //needed?
@@ -911,7 +967,6 @@ static int bb_bio_synchronous_readwrite(
 		bio_dup->bi_rw &= ~(1 << BIO_RW);
         
 
-	args.old_endio = bio_dup->bi_end_io;
 	bio_dup->bi_end_io = bb_bio_readwrite_end_io;
 
 	bio_dup->bi_private = &args; 
@@ -920,10 +975,12 @@ static int bb_bio_synchronous_readwrite(
 		q,
 		bio_dup);
 
-	blkdev_issue_flush(bdev,NULL); //this wont complete here, but we dont care
+	//blkdev_issue_flush(bdev,NULL); //this wont complete here, but we dont care
 	if(1||!isWrite) wait_for_completion(&c);
 
-
+#ifdef TRY_NO_DOUBLEBUFFER
+    bio_put(bio_dup);
+#endif
 
 	return 0;
 }

@@ -912,6 +912,14 @@ inline int DevOp(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, vo
 	num_ops = bytelen>>ops->log2_blocksize; // assumes bytelen is multiple of blocksize
 	blocksize = (1<<ops->log2_blocksize);
 
+	if(ictx->ctx->use_object_interface)
+    {
+        /* force single operation */
+        num_ops=1;
+        /* note that pointer arithmetic below should 
+         * always yield original object */
+    }
+
     if(num_ops < 1 && op!=DEV_ALLOC) //return -1; //error must read/write/alloc full blocks
     {
         /* will need to malloc space and memcpy (this is slow!) */
@@ -957,7 +965,10 @@ inline int DevOp(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, vo
     return 0;
 }
 
-int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut, BOOL isThru)
+#define WNWT_getput_diskblock( ictx,  addr,  data, isPut, isThru) \
+    WNWT_getput_diskblock_obj(ictx,addr,data,isPut,isThru,0)
+
+int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut, BOOL isThru, size_t objSize)
 {
 	BOOL rtn=TRUE;
 	cache_imp* cache = (cache_imp*)ictx->data;
@@ -972,16 +983,22 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
 
 	DBG({dprintf("WNWT_getput_diskblock: addr:0x%08llx %s %s\n",addr,isPut?"WRITE":"READ",isThru?"THRU":"NONE");})
 
+    if(ictx->ctx->use_object_interface)
+    {
+        devByteCnt = objSize; //make the object size the "block" size
+    }
+
 	/* check cache */
 
 	/* calc num cacheops.read equal to disk blocksize / cache blocksize */
 	num_cache_ops = 1;
-	if(ictx->ctx->dev_ops.log2_blocksize > ictx->ctx->cache_ops.log2_blocksize)
+	if(devByteCnt > cacheByteCnt)
 	{
-		num_cache_ops = (1<<(ictx->ctx->dev_ops.log2_blocksize-ictx->ctx->cache_ops.log2_blocksize));
+		num_cache_ops = (devByteCnt+(cacheByteCnt-1))/cacheByteCnt; //round up
 	}
 	else
 	{
+        /* this case is very untested XXX */
 		/* make cacheReadCnt the smaller value */
 		cacheByteCnt = devByteCnt;
 	}
@@ -1304,13 +1321,25 @@ int WNWT_getput_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut,
 #define WT_get_diskblock( ictx, addr,   data) \
     WN_get_diskblock( ictx, addr, data)
 
+/* obj */
+#define WN_put_diskblockobj( ictx,  addr,  data, sz) \
+    WNWT_getput_diskblock_obj(ictx,addr,data,TRUE,FALSE, sz)
 
-#define TEMPLATE_get(thetype,diskblock)\
- TEMPLATE_getput(thetype,diskblock,0)
-#define TEMPLATE_put(thetype,diskblock)\
- TEMPLATE_getput(thetype,diskblock,1)
+#define WT_put_diskblockobj( ictx,  addr,  data, sz) \
+    WNWT_getput_diskblock_obj(ictx,addr,data,TRUE,TRUE, sz)
 
-#define TEMPLATE_getput(thetype,diskblock,isWrite)\
+#define WN_get_diskblockobj( ictx,  addr,  data, sz) \
+	WNWT_getput_diskblock_obj(ictx, addr, data,FALSE,FALSE, sz)
+
+#define WT_get_diskblockobj( ictx, addr,   data, sz) \
+    WN_get_diskblockobj( ictx, addr, data, sz)
+
+#define TEMPLATE_get(thetype,diskblock,dbobj)\
+ TEMPLATE_getput(thetype,diskblock,0,dbobj)
+#define TEMPLATE_put(thetype,diskblock,dbobj)\
+ TEMPLATE_getput(thetype,diskblock,1,dbobj)
+
+#define TEMPLATE_getput(thetype,diskblock,isWrite,diskblockobj)\
 \
 BOOL thetype(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz) \
 { \
@@ -1333,6 +1362,12 @@ BOOL thetype(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz) \
     if(fullblocks<0) fullblocks=0; \
 \
 	DBG({dprintf( #thetype ": addr:0x%08llx\n",addr);}) \
+    \
+	if(ictx->ctx->use_object_interface) \
+    { /* assume only a single back-end call is neccessary and everything is aligned */ \
+		if(0==diskblockobj(ictx,addr,data,sz)) return FALSE; \
+        return TRUE; \
+    } \
 \
 	if(startoffset!=0) \
 	{ \
@@ -1394,10 +1429,10 @@ BOOL thetype(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz) \
 }\
 
 
-TEMPLATE_get(WN_get,WN_get_diskblock)
-TEMPLATE_put(WN_put,WN_put_diskblock)
-TEMPLATE_get(WT_get,WT_get_diskblock)
-TEMPLATE_put(WT_put,WT_put_diskblock)
+TEMPLATE_get(WN_get,WN_get_diskblock,WN_get_diskblockobj)
+TEMPLATE_put(WN_put,WN_put_diskblock,WN_put_diskblockobj)
+TEMPLATE_get(WT_get,WT_get_diskblock,WT_get_diskblockobj)
+TEMPLATE_put(WT_put,WT_put_diskblock,WT_put_diskblockobj)
 
 
 /*
@@ -1853,7 +1888,7 @@ int main(int argc, char* argv[])
 			FALSE,//TRUE,
 			NULL,//mdisk_asyncwrite
 		},
-		0,0
+		0,0,0
 	};
 
 #else
@@ -1886,7 +1921,7 @@ int main(int argc, char* argv[])
 			TRUE,
 			mdisk_asyncwrite
 		},
-		0,0
+		0,0,0
 	};
 #endif
 
