@@ -728,7 +728,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
         	args.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
-		bb_sync_sector_read(&args, ((ADDRESS)sector)<<9, kaddr, len);
+		bb_sync_sector_read(&args, ((ADDRESS)sector)<<9, obj, len);
 #endif
 
 #ifndef TRY_NO_DOUBLEBUFFER
@@ -775,7 +775,7 @@ static int bb_handle_bio(struct bb_device *bb, struct bio *bio)
 		args.bdev = bb->bdev_a;
 		args.q = bb->bb_backing_queue_a;
         	args.log2_blocksize=mylog2(bdev_hardsect_size(bb->bdev_a));
-		bb_sync_sector_write(&args, ((ADDRESS)sector)<<9, kaddr, len);
+		bb_sync_sector_write(&args, ((ADDRESS)sector)<<9, obj, len);
 #endif
 		/* Wait for completion */
 	}
