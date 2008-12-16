@@ -88,6 +88,7 @@ typedef struct CACHE_CTX_st {
 	CACHE_DEVOPS cache_ops;
 	BOOL initialized;
 	void* internal_data;
+    BOOL use_object_interface; /* if true, assume get/put are exactly 1 primary blocksize-ed object */
 } CACHE_CTX, *PCACHE_CTX;
 
 
