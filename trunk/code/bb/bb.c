@@ -402,7 +402,7 @@ static int bb_set_fd(struct bb_device *bb,
         if(bb->ctx->cache_ops.num_blocks > 2*1024*BB_FORCE_MAX_CAPACITY)
 		bb->ctx->cache_ops.num_blocks = 2*1024*BB_FORCE_MAX_CAPACITY;
 	#endif
-        bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bio_readwrite_args),GFP_KERNEL);
+        bb->ctx->cache_ops.opaque_data = kzalloc(sizeof(struct bb_underdisk),GFP_KERNEL);
         if(!bb->ctx->cache_ops.opaque_data) {
 	    	dprintk (KERN_WARNING "bb: cant allocate bb->ctx->cache_ops.opaque_data\n");
             /* XXX should probably change error code */
