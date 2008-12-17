@@ -70,7 +70,8 @@ typedef struct CACHE_DEVOPS_st {
 	unsigned char log2_blocksize;
 	unsigned long long num_blocks;
 	BOOL supportsAsync;
-	int (*asyncwrite)(void* arg, ADDRESS address, BYTE* data, size_t sz, void* context, void (*callback)(void*,int));
+	int (*asyncwrite)(void* arg, ADDRESS address, BYTE* data, size_t sz, void** pcompletion);
+	int (*asyncwritewaitcomplete)(void* arg, ADDRESS address, BYTE* data, size_t sz, void* completion);
 } CACHE_DEVOPS, *PCACHE_DEVOPS;
 
 /* function pointers for memory usage by the cache code */

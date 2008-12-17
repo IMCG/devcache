@@ -636,267 +636,20 @@ BOOL CACHEi_MakeCacheNode(PCACHE_ICTX ictx, cached_data** cdata, BOOL* gotEvicte
 	return TRUE;
 }
 
-int WNWT_getput_diskblock_OLD(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL isPut, BOOL isThru)
-{
-	BOOL rtn;
-	cache_imp* cache = (cache_imp*)ictx->data;
-	size_t devReadCnt = 1<<ictx->ctx->dev_ops.log2_blocksize;
-	size_t cacheReadCnt = 1<<ictx->ctx->cache_ops.log2_blocksize;
-	cached_data *mdataptr=NULL;
-	cache_node* cnode;
-	int i;
-	int num_reads;
-	BOOL cleaningDirtyNode=FALSE;
-	BOOL hitOrDirty=FALSE;
-
-	DBG({dprintf("WNWT_getput_diskblock: addr:0x%08llx %s %s\n",addr,isPut?"WRITE":"READ",isThru?"THRU":"NONE");})
-
-
-	/* check cache */
-
-	/* calc num cacheops.read equal to disk blocksize / cache blocksize */
-	num_reads = 1;
-	if(ictx->ctx->dev_ops.log2_blocksize > ictx->ctx->cache_ops.log2_blocksize)
-	{
-		num_reads = (1<<(ictx->ctx->dev_ops.log2_blocksize-ictx->ctx->cache_ops.log2_blocksize));
-	}
-	else
-	{
-		/* make cacheReadCnt the smaller value */
-		cacheReadCnt = devReadCnt;
-	}
-	DBG({dprintf("\t num_reads:0x%02x devReadCnt:0x%08x cacheReadCnt:0x%08x\n",num_reads,devReadCnt,cacheReadCnt);})
-
-
-	/* do cache read, if found, then done */
-	if(cache_retrieve_node(cache, &addr, &cnode))
-	{
-		mdataptr = cache_entry(cnode, cached_data, cnode);
-		generic_mutex_lock(&mdataptr->lock);
-		if((void*)mdataptr->p == (void*)-1)
-		{
-			cleaningDirtyNode=TRUE;
-		}
-
-		hitOrDirty=TRUE;
-		DBGL(1,{dprintf("\t cache %s: cnode:%p\n",cleaningDirtyNode?"DIRTY":"HIT",cnode);})
-	}
-	
-
-	if(hitOrDirty && !cleaningDirtyNode)
-	{
-
-		rtn=FALSE;
-// FIX, check locking of mdataptr->p when async writing frees pointer
-		if(ictx->ctx->cache_ops.supportsAsync && mdataptr->p)
-		{
-			if(isPut)
-			{
-				/* write to (previously allocated) temp storage while async write is pending */
-				memcpy(mdataptr->p,data,num_reads*cacheReadCnt);
-			}
-			else
-			{
-				/* read from temp storage while async write is pending */
-				memcpy(data,mdataptr->p,num_reads*cacheReadCnt);
-			}
-			rtn=TRUE;
-		}
-		else
-		{
-		    if(isPut)
-    		{
-    			/* write to disk */
-    			if(0!=ictx->ctx->dev_ops.write(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
-					return FALSE;
-    			}
-    		}
-			if(isPut && isThru)
-			{
-				/* do write to cache_dev. all writes to cache_dev upon cache hit are synchronous */
-				rtn=TRUE;
-				for(i=0;i<num_reads;++i)
-				{
-					if(0!=ictx->ctx->cache_ops.write(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,data+i*cacheReadCnt,cacheReadCnt)) {
-							rtn=FALSE;
-							break;
-					}
-				}
-			}
-            else if(isPut && !isThru)
-            {
-		        mdataptr->p = (void*)-1; //mark dirty
-                rtn=TRUE;
-            }
-			else
-			{
-				/* do reads from cache_dev */
-				rtn=TRUE;
-				for(i=0;i<num_reads;++i)
-				{
-					if(0!=ictx->ctx->cache_ops.read(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,data+i*cacheReadCnt,cacheReadCnt)) {
-							rtn=FALSE;
-							break;
-					}
-				}
-			}
-		}
-			
-		if(!rtn)
-		{
-			/* read from cache disk failed, remove from cache structure */
-			cache_imp_remove(cache,cnode);//not locked but calls del_entry_safe so should be ok?
-			//continue to get from disk
-		}
-		else
-		{
-			generic_mutex_unlock(&mdataptr->lock);
-			if(!cache_touch_node(cache, cnode)) return -1;
-			if(!cache_release_node(cache, cnode)) return -1;
-			return rtn;
-		}
-	}
-
-	/* else: do (reads from disk OR write to disk) and put in cache */
-	if(!hitOrDirty) DBGL(1,{dprintf("\t cache MISS (or error on hit)\n");})
-
-	{
-		if(!isPut)
-		{
-			/* read from disk */
-			if(0!=ictx->ctx->dev_ops.read(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
-					return FALSE;
-			}
-		}
-
-		/* add to cache / write to cache dev */
-		{
-			BOOL gotEvictee;
-			BYTE* abuf=NULL;
-
-			if(!cleaningDirtyNode)
-			{
-				if(!CACHEi_MakeCacheNode(ictx, &mdataptr, &gotEvictee))
-				{
-					return -1;
-				}
-			
-				if(!gotEvictee)
-				{
-					/* allocate cachedev blocks */
-					if(0!=ictx->ctx->cache_ops.alloc(ictx->ctx->cache_ops.opaque_data,&mdataptr->addr,num_reads))
-					{
-						if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-						return FALSE;
-					}
-					DBG({dprintf("\t allocated cache_dev block @ 0x%08llx\n",mdataptr->addr);})
-
-				}
-			}
-
-			if(ictx->ctx->cache_ops.supportsAsync)
-			{
-				/* copy data to async buffer */
-				abuf = ictx->ctx->mem_ops.malloc(num_reads*cacheReadCnt);
-				if(!abuf) 
-				{	
-					generic_mutex_unlock(&mdataptr->lock);
-					return -1;
-				}
-				memcpy(abuf,data,num_reads*cacheReadCnt);
-
-				/* alter entry to include async buffer */
-				mdataptr->p=abuf;
-				
-				/* post async cache_ops.write */
-				{
-					WN_cache_asyncwrite_callback_data* cbdata = ictx->ctx->mem_ops.malloc(sizeof(WN_cache_asyncwrite_callback_data));
-					if(!cbdata)
-					{	
-						generic_mutex_unlock(&mdataptr->lock);
-						return -1;
-					}
-
-					cbdata->ictx=ictx;
-					cbdata->mdataptr=mdataptr;
-					generic_atomic_init(num_reads, &cbdata->sem_cnt);
-					for(i=0;i<num_reads;++i)
-					{
-						if(0!=ictx->ctx->cache_ops.asyncwrite(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,mdataptr->p+i*cacheReadCnt,cacheReadCnt,cbdata,WN_cache_asyncwrite_callback))
-						{
-							ictx->ctx->mem_ops.free(abuf);
-							if(!gotEvictee && mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-							if(i==0)
-							{
-								ictx->ctx->mem_ops.free(cbdata);
-							}
-							else /* should decrement sem_cnt (num_reads-i) times */
-							{
-								int j;
-								for(j=0;j<(num_reads-i);++j)
-									generic_atomic_dec_and_test(&cbdata->sem_cnt);
-							}
-							generic_mutex_unlock(&mdataptr->lock);
-							return -1;
-						}
-					}
-				}
-			}
-			else
-			{
-				/* do sync writes */
-				for(i=0;i<num_reads;++i)
-				{
-					if(0!=ictx->ctx->cache_ops.write(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,data+i*cacheReadCnt,cacheReadCnt)) {
-							rtn = ictx->ctx->cache_ops.free(ictx->ctx->cache_ops.opaque_data,mdataptr->addr,num_reads);
-							if(!gotEvictee && mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-							return -1;
-					}
-				}
-			}	
-
-        /* cache miss, write to primary disk (async write to cache started already) */
-    		if(isPut)
-    		{
-    			/* write to disk */
-    			if(0!=ictx->ctx->dev_ops.write(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
-    					return FALSE;
-    			}
-    		}
-		
-			if(!cleaningDirtyNode && !gotEvictee)
-			{
-				/* insert cache entry */
-				if(!cache_insert_node(cache,&addr,&mdataptr->cnode))
-				{
-					if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-					if(abuf) ictx->ctx->mem_ops.free(abuf);
-					return -1;
-				}
-			}
-			else
-			{
-				generic_mutex_unlock(&mdataptr->lock);
-				/*	insert cache entry */
-				if(!cache_reinsert_node(cache,&addr,&mdataptr->cnode))
-				{
-					if(abuf) ictx->ctx->mem_ops.free(abuf);
-					return -1;
-				}
-			}
-		}
-
-	}
-	return TRUE;
-}
-
 
 #define DEV_PRIMARY 0
 #define DEV_CACHE 1
 #define DEV_READ 0
 #define DEV_WRITE 1
 #define DEV_ALLOC 2
-inline int DevOp(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, void* data, int op)
+#define DEV_AWRITE 3
+#define DEV_AWRITE_WAITCOMPLETE 4
+#define DEV_AWRITE_NOTSUPPORTED -3
+
+#define DevOp(ictx, device, addr, bytelen, data, op) \
+    DevOpEx(ictx, device, addr, bytelen, data, op, NULL)
+
+inline int DevOpEx(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, void* data, int op, void*** completions)
 {
     unsigned int i,num_ops;
     unsigned int blocksize;
@@ -918,6 +671,21 @@ inline int DevOp(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, vo
         num_ops=1;
         /* note that pointer arithmetic below should 
          * always yield original object */
+    }
+
+    if(op==DEV_AWRITE || op==DEV_AWRITE_WAITCOMPLETE)
+    {
+        if(!ops->supportsAsync)
+        {
+            if(completions) *completions=NULL;
+            return DEV_AWRITE_NOTSUPPORTED;
+        }
+        if(op==DEV_AWRITE_WAITCOMPLETE && !completions)
+            return -1;
+
+        if(completions) {
+            *completions = (void**)cache_malloc(sizeof(void*)*num_ops);
+        }
     }
 
     if(num_ops < 1 && op!=DEV_ALLOC) //return -1; //error must read/write/alloc full blocks
@@ -953,6 +721,10 @@ inline int DevOp(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, vo
         	if(0!=ops->read(ops->opaque_data,*addr+i*blocksize,data+i*blocksize,blocksize)) return -1;
         if(op==DEV_WRITE)
         	if(0!=ops->write(ops->opaque_data,*addr+i*blocksize,data+i*blocksize,blocksize)) return -1;
+        if(op==DEV_AWRITE)
+        	if(0!=ops->asyncwrite(ops->opaque_data,*addr+i*blocksize,data+i*blocksize,blocksize, completions?(&((*completions)[i])):NULL )) return -1;
+        if(op==DEV_AWRITE_WAITCOMPLETE)
+        	if(0!=ops->asyncwritewaitcomplete(ops->opaque_data,*addr+i*blocksize,data+i*blocksize,blocksize, completions?((*completions)[i]):NULL )) return -1;
     }
     /* special case with ALLOC.
      *  expected to allocate contiguous multiblock segments */
@@ -961,6 +733,11 @@ inline int DevOp(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, vo
         	if(0!=ops->alloc(ops->opaque_data,addr,allocsz)) return -1;
 
         }
+
+    if(op==DEV_AWRITE_WAITCOMPLETE) {
+        cache_free(*completions);
+        *completions=NULL;
+    }
 
     return 0;
 }
@@ -1080,6 +857,8 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
     }
     else /* writing */
     {
+        void** completions=NULL; //for async ops MUST init to NULL
+
         if(!isThru) /* write none */
         {
             /* mark dirty */
@@ -1088,10 +867,22 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
         else /* write thru */
         {
             /* if async support should do it here */
+            int aret;
+            aret = DevOpEx(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_AWRITE, &completions);
+            if(aret==DEV_AWRITE_NOTSUPPORTED)
+            { /* must do sync write */
+            
             if(0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_WRITE))
             {
                 /* failed badly */
-	            DBG({dprintf("DevOp (write primary) FAILED\n");})
+	            DBG({dprintf("DevOp (write cache) FAILED\n");})
+                rtn=FALSE;
+            }
+
+            }
+            else if(aret!=0) /* async write failed */
+            {
+	            DBG({dprintf("DevOp (async write cache) FAILED\n");})
                 rtn=FALSE;
             }
             
@@ -1105,6 +896,14 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
         }
 
         /* if cache async write support, complete here */
+        if(completions!=NULL)
+        {  /* async support available and there are things to complete! */
+            if(0!=DevOpEx(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_AWRITE_WAITCOMPLETE, &completions))
+            {
+                DBG({dprintf("DevOp (write complete cache) FAILED\n");})
+                rtn = FALSE;
+            }
+        }
         
     }
 
@@ -1138,177 +937,6 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
 
 }
 
-#ifdef  OLD_READWRITEBLOCK_CODE
-
-// FIX, check locking of mdataptr->p when async writing frees pointer
-#if 0 //NO ASYNC yet
-		if(ictx->ctx->cache_ops.supportsAsync && mdataptr->p)
-		{
-			if(isPut)
-			{
-				/* write to (previously allocated) temp storage while async write is pending */
-				memcpy(mdataptr->p,data,num_reads*cacheReadCnt);
-			}
-			else
-			{
-				/* read from temp storage while async write is pending */
-				memcpy(data,mdataptr->p,num_reads*cacheReadCnt);
-			}
-			rtn=TRUE;
-		}
-		else
-#endif
-
-		if(!rtn)
-		{
-			/* read from cache disk failed, remove from cache structure */
-			cache_imp_remove(cache,cnode);//not locked but calls del_entry_safe so should be ok?
-			//continue to get from disk
-		}
-		else
-		{
-			generic_mutex_unlock(&mdataptr->lock);
-			if(!cache_touch_node(cache, cnode)) return -1;
-			if(!cache_release_node(cache, cnode)) return -1;
-			return rtn;
-		}
-	}
-
-	/* else: do (reads from disk OR write to disk) and put in cache */
-	if(!hitOrDirty) DBGL(1,{dprintf("\t cache MISS (or error on hit)\n");})
-
-	{
-		if(!isPut)
-		{
-			/* read from disk */
-			if(0!=ictx->ctx->dev_ops.read(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
-					return FALSE;
-			}
-		}
-
-		/* add to cache / write to cache dev */
-		{
-			BOOL gotEvictee;
-			BYTE* abuf=NULL;
-
-			if(!cleaningDirtyNode)
-			{
-				if(!CACHEi_MakeCacheNode(ictx, &mdataptr, &gotEvictee))
-				{
-					return -1;
-				}
-			
-				if(!gotEvictee)
-				{
-					/* allocate cachedev blocks */
-					if(0!=ictx->ctx->cache_ops.alloc(ictx->ctx->cache_ops.opaque_data,&mdataptr->addr,num_reads))
-					{
-						if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-						return FALSE;
-					}
-					DBG({dprintf("\t allocated cache_dev block @ 0x%08llx\n",mdataptr->addr);})
-
-				}
-			}
-
-			if(ictx->ctx->cache_ops.supportsAsync)
-			{
-				/* copy data to async buffer */
-				abuf = ictx->ctx->mem_ops.malloc(num_reads*cacheReadCnt);
-				if(!abuf) 
-				{	
-					generic_mutex_unlock(&mdataptr->lock);
-					return -1;
-				}
-				memcpy(abuf,data,num_reads*cacheReadCnt);
-
-				/* alter entry to include async buffer */
-				mdataptr->p=abuf;
-				
-				/* post async cache_ops.write */
-				{
-					WN_cache_asyncwrite_callback_data* cbdata = ictx->ctx->mem_ops.malloc(sizeof(WN_cache_asyncwrite_callback_data));
-					if(!cbdata)
-					{	
-						generic_mutex_unlock(&mdataptr->lock);
-						return -1;
-					}
-
-					cbdata->ictx=ictx;
-					cbdata->mdataptr=mdataptr;
-					generic_atomic_init(num_reads, &cbdata->sem_cnt);
-					for(i=0;i<num_reads;++i)
-					{
-						if(0!=ictx->ctx->cache_ops.asyncwrite(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,mdataptr->p+i*cacheReadCnt,cacheReadCnt,cbdata,WN_cache_asyncwrite_callback))
-						{
-							ictx->ctx->mem_ops.free(abuf);
-							if(!gotEvictee && mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-							if(i==0)
-							{
-								ictx->ctx->mem_ops.free(cbdata);
-							}
-							else /* should decrement sem_cnt (num_reads-i) times */
-							{
-								int j;
-								for(j=0;j<(num_reads-i);++j)
-									generic_atomic_dec_and_test(&cbdata->sem_cnt);
-							}
-							generic_mutex_unlock(&mdataptr->lock);
-							return -1;
-						}
-					}
-				}
-			}
-			else
-			{
-				/* do sync writes */
-				for(i=0;i<num_reads;++i)
-				{
-					if(0!=ictx->ctx->cache_ops.write(ictx->ctx->cache_ops.opaque_data,mdataptr->addr+i*cacheReadCnt,data+i*cacheReadCnt,cacheReadCnt)) {
-							rtn = ictx->ctx->cache_ops.free(ictx->ctx->cache_ops.opaque_data,mdataptr->addr,num_reads);
-							if(!gotEvictee && mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-							return -1;
-					}
-				}
-			}	
-
-        /* cache miss, write to primary disk (async write to cache started already) */
-    		if(isPut)
-    		{
-    			/* write to disk */
-    			if(0!=ictx->ctx->dev_ops.write(ictx->ctx->dev_ops.opaque_data,addr,data,devReadCnt)) {
-    					return FALSE;
-    			}
-    		}
-		
-			if(!cleaningDirtyNode && !gotEvictee)
-			{
-				/* insert cache entry */
-				if(!cache_insert_node(cache,&addr,&mdataptr->cnode))
-				{
-					if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
-					if(abuf) ictx->ctx->mem_ops.free(abuf);
-					return -1;
-				}
-			}
-			else
-			{
-				generic_mutex_unlock(&mdataptr->lock);
-				/*	insert cache entry */
-				if(!cache_reinsert_node(cache,&addr,cnode))
-				{
-					if(abuf) ictx->ctx->mem_ops.free(abuf);
-					return -1;
-				}
-			}
-		}
-
-	}
-	return TRUE;
-}
-
-#endif /* OLD_READWRITEBLOCK_CODE */
-
 #define WN_put_diskblock( ictx,  addr,  data) \
     WNWT_getput_diskblock(ictx,addr,data,TRUE,FALSE)
 
@@ -1321,7 +949,7 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
 #define WT_get_diskblock( ictx, addr,   data) \
     WN_get_diskblock( ictx, addr, data)
 
-/* obj */
+/* obj interface */
 #define WN_put_diskblockobj( ictx,  addr,  data, sz) \
     WNWT_getput_diskblock_obj(ictx,addr,data,TRUE,FALSE, sz)
 
@@ -1349,7 +977,7 @@ BOOL thetype(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz) \
 	ADDRESS startpage = addr & ~((ADDRESS)(bs-1)); \
 	size_t startoffset = ((size_t)addr) & (bs-1); \
     ADDRESS endpage = (addr+(sz-1)) & ~((ADDRESS)(bs-1)); \
-	size_t endoffset = ((size_t)(addr+(sz-1))) & (bs-1); \
+/*	size_t endoffset = ((size_t)(addr+(sz-1))) & (bs-1); */ \
 	size_t exendoffset = ((size_t)(addr+(sz))) & (bs-1); \
 /*    int fullblocks = (endpage/bs)-(startpage/bs)+1 \
          - (startoffset?1:0) - (exendoffset?1:0); \ */ \
@@ -1435,64 +1063,6 @@ TEMPLATE_get(WT_get,WT_get_diskblock,WT_get_diskblockobj)
 TEMPLATE_put(WT_put,WT_put_diskblock,WT_put_diskblockobj)
 
 
-/*
-BOOL WT_put(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz)
-{
-	size_t i,startblock;
-	size_t bs = (1ull<<ictx->ctx->dev_ops.log2_blocksize);
-	ADDRESS base;
-	size_t offset;
-	offset = ((size_t)addr) & (bs-1);
-	base = addr & ~((ADDRESS)(bs-1));
-	startblock=0;
- 
-	DBG({dprintf("WT_put: addr:0x%08llx\n",addr);})
-
-	if(offset!=0)
-	{
-		size_t toCopy;
-		BYTE* buf = (BYTE*)cache_malloc(bs);
-		if(!buf) return FALSE;
-		if(0==WNWT_getput_diskblock(ictx,base,buf,FALSE,FALSE))
-		{
-			cache_free(buf);
-			return FALSE;
-		}
-		toCopy = bs-offset>sz?sz:bs-offset;
-		memcpy(buf+offset,data,toCopy);
-		if(0==WT_put_diskblock(ictx,base,buf))
-		{
-			cache_free(buf);
-			return FALSE;
-		}
-		cache_free(buf);
-		startblock=bs;
-		sz-=toCopy;
-	}
-	for(i=startblock;(i+bs)<=sz;i+=bs)
-	{
-		if(0==WT_put_diskblock(ictx,base+i,data-offset+i)) return FALSE;
-	}
-	if(sz>i)
-	{
-		BYTE* buf = (BYTE*)cache_malloc(bs);
-		if(!buf) return FALSE;
-		if(0==WNWT_getput_diskblock(ictx,base+i,buf,FALSE,FALSE))
-		{
-			cache_free(buf);
-			return FALSE;
-		}
-		memcpy(buf,data-offset+i,sz-i);
-		if(0==WT_put_diskblock(ictx,base+i,buf))
-		{
-			cache_free(buf);
-			return FALSE;
-		}
-		cache_free(buf);
-	}
-	return TRUE;
-}
-*/
 
 BOOL CACHEi_COMMON_defaultsize(PCACHE_CTX ctx, unsigned long long* sz)
 {
@@ -1875,7 +1445,8 @@ int main(int argc, char* argv[])
 			under_disk_log2_blocksize,
 			under_disk_numblocks,
 			FALSE,
-			NULL
+			NULL,
+            NULL
 		},
 		{
 			mdisk_read,
@@ -1887,6 +1458,7 @@ int main(int argc, char* argv[])
 			cache_disk_numblocks,
 			FALSE,//TRUE,
 			NULL,//mdisk_asyncwrite
+            NULL
 		},
 		0,0,0
 	};
@@ -1908,7 +1480,8 @@ int main(int argc, char* argv[])
 			under_disk_log2_blocksize,
 			under_disk_numblocks,
 			FALSE,
-			NULL
+			NULL,
+            NULL
 		},
 		{
 			mdisk_read,
@@ -1918,8 +1491,9 @@ int main(int argc, char* argv[])
 			&cache_buf,
 			cache_disk_log2_blocksize,
 			cache_disk_numblocks,
-			TRUE,
-			mdisk_asyncwrite
+			FALSE,//TRUE,
+			NULL,//mdisk_asyncwrite
+            NULL
 		},
 		0,0,0
 	};

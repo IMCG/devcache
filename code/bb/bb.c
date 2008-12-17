@@ -149,25 +149,13 @@ static void* krealloc_wrapper(void* p, size_t newsz)
 }
 static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t sz);
 static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_t sz);
+static int bb_async_sector_write(void *opaque, ADDRESS address, BYTE* data, size_t sz, void** ppcompletion);
+static int bb_async_sector_write_waitcomplete(void *opaque, ADDRESS address, BYTE* data, size_t sz, void* ppcompletion);
 
 static int bb_sector_alloc(void* arg, ADDRESS* address, size_t sz) {
     struct bb_underdisk* d = (struct bb_underdisk*)arg;
-#ifdef OLD_CODE
-	unsigned long long i=d->next_free_sector;
-	unsigned long long bs = 1ull<< d->log2_blocksize;
-
-	printk(KERN_WARNING "TOP %p %p bb_sector_alloc i: %lld bs: %lld nfs: %lld\n",
-		arg,d,i,bs,d->next_free_sector);
-
-	*address=i;
-	i+=sz*bs;
-	d->next_free_sector = i;
-	printk(KERN_WARNING "BOT %p %p bb_sector_alloc i: %lld bs: %lld nfs: %lld\n",
-		arg,d,i,bs,d->next_free_sector);
-#else
 	*address =(d->next_free_sector)<<d->log2_blocksize;
     d->next_free_sector+=sz;
-#endif
 	return 0;
 }
 
@@ -190,7 +178,8 @@ static CACHE_CTX g_CACHE_CTX_TEMPLATE = {
 			9,//under_disk_log2_blocksize, /* ALWAYS 512 */
 			0,//under_disk_numblocks,
 			FALSE,
-			NULL
+			NULL,
+            NULL
 		},
 		{
 			bb_sync_sector_read,
@@ -200,8 +189,15 @@ static CACHE_CTX g_CACHE_CTX_TEMPLATE = {
 			NULL,//&cache_buf,
 			9,//cache_disk_log2_blocksize, /* ALWAYS 512 */
 			0,//cache_disk_numblocks,
+#ifdef BB_CACHE_ASYNCWRITES
+			TRUE,
+			bb_async_sector_write,
+            bb_async_sector_write_waitcomplete
+#else
 			FALSE,//TRUE,
-			NULL//mdisk_asyncwrite
+            NULL,
+            NULL
+#endif
 		},
 		0,0
 #ifdef TRY_NO_DOUBLEBUFFER
@@ -817,58 +813,7 @@ static void copykern2bio(struct bio *bio, unsigned char* kaddr, unsigned int kle
     }
 }
 
-static int bb_bio_synchronous_readwrite(
-	struct bb_device *bb,     //needed???
-	struct block_device* bdev, //destination blockdevice* needed???
-	struct request_queue *q,  //destination request_queue*
-	sector_t sector,          //sector to read/write
-	unsigned char* buf,       //src/dst data (kernel mem)
-	unsigned int bytes,       //buf size
-	bool isWrite              //true if writing to device
-	);
-
-static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t sz)
-{
-	int rc;
-	struct bb_underdisk *args = opaque;
-
-    printk(KERN_WARNING "bb_sync_sector_read %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
-
-	rc = bb_bio_synchronous_readwrite(
-		args->bb,
-		args->bdev,
-		args->q,
-		address>>9,
-		data,
-		sz,
-		false /* isWrite */
-		);
-
-	return rc;
-}
-
-static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_t sz)
-{
-	int rc;
-	struct bb_underdisk *args = opaque;
-
-    printk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
-
-	rc = bb_bio_synchronous_readwrite(
-		args->bb,
-		args->bdev,
-		args->q,
-		address>>9,
-		data,
-		sz,
-		true /* isWrite */
-		);
-
-	return rc;
-}
-
-
-static int bb_bio_readwrite_end_io(struct bio *bio, unsigned int bytes, int status)
+static int bb_bio_readwritesync_end_io(struct bio *bio, unsigned int bytes, int status)
 {
     struct bio_readwrite_args* args = (struct bio_readwrite_args*)bio->bi_private;
     int r=0;
@@ -877,19 +822,38 @@ static int bb_bio_readwrite_end_io(struct bio *bio, unsigned int bytes, int stat
 
     if(args->old_endio)
         r=args->old_endio(bio,bytes,status); //normal end_io function for map_kern
+#ifdef TRY_NO_DOUBLEBUFFER
+    bio_put(bio);
+#endif
 	if(args->c) complete(args->c);
     if(r) return r;
 
 	return 0;
 }
-static int bb_bio_synchronous_readwrite(
+static int bb_bio_readwriteasync_end_io(struct bio *bio, unsigned int bytes, int status)
+{
+    struct completion* c = (struct completion*)bio->bi_private;
+
+    dprintk(KERN_WARNING "completing bb_bio_asynchronous_readwrite\n");
+
+#ifdef TRY_NO_DOUBLEBUFFER
+    bio_put(bio);
+#endif
+	if(c) {
+        complete(c);
+    }
+
+	return 0;
+}
+static int bb_bio_readwrite(
 	struct bb_device *bb,     //needed???
 	struct block_device* bdev, //destination blockdevice* needed???
 	struct request_queue *q,  //destination request_queue*
 	sector_t sector,          //sector to read/write
 	unsigned char* buf,       //src/dst data (kernel mem)
 	unsigned int bytes,       //buf size
-	bool isWrite              //true if writing to device
+	bool isWrite,              //true if writing to device
+    struct completion* pc      //completion (NULL if synchronous)
 	)
 {
 	struct bio *bio_dup;
@@ -903,14 +867,15 @@ static int bb_bio_synchronous_readwrite(
 	//printk(KERN_WARNING "bio readwrite hss=%u\n",hss);
 
     //printk(KERN_WARNING "bb_bio_synchronous_readwrite %p %p %p s:%08x buf:%p sz:%08x w?:%d hss:%d\n",bb,bdev,q,sector,buf,bytes,isWrite,hss);
-    printk(KERN_WARNING "bb_bio_synchronous_readwrite s:%08x\n",sector);
-    printk(KERN_WARNING "bb_bio_synchronous_readwrite buf:%p\n",buf);
-    printk(KERN_WARNING "bb_bio_synchronous_readwrite sz:%08x\n",bytes);
-    printk(KERN_WARNING "bb_bio_synchronous_readwrite w:%d\n",(int)isWrite);
-    printk(KERN_WARNING "bb_bio_synchronous_readwrite hss:%d\n",hss);
+    printk(KERN_WARNING "bb_bio_readwrite s:%08x\n",sector);
+    printk(KERN_WARNING "bb_bio_readwrite buf:%p\n",buf);
+    printk(KERN_WARNING "bb_bio_readwrite sz:%08x\n",bytes);
+    printk(KERN_WARNING "bb_bio_readwrite w:%d\n",(int)isWrite);
+    printk(KERN_WARNING "bb_bio_readwrite hss:%d\n",hss);
+    printk(KERN_WARNING "bb_bio_readwrite pc:%p\n",pc);
 
 	args.c=NULL;
-	if(1||!isWrite)
+	if(!pc)
 		args.c=&c;
 
 #ifndef TRY_NO_DOUBLEBUFFER
@@ -967,24 +932,141 @@ static int bb_bio_synchronous_readwrite(
 		bio_dup->bi_rw &= ~(1 << BIO_RW);
         
 
-	bio_dup->bi_end_io = bb_bio_readwrite_end_io;
+    if(!pc)
+    {
+    	bio_dup->bi_end_io = bb_bio_readwritesync_end_io;
+	    bio_dup->bi_private = &args; 
+    }
+    else
+    {
+	    bio_dup->bi_end_io = bb_bio_readwriteasync_end_io;
+	    bio_dup->bi_private = pc; 
+    }
 
-	bio_dup->bi_private = &args; 
 
 	q->make_request_fn(
 		q,
 		bio_dup);
 
 	//blkdev_issue_flush(bdev,NULL); //this wont complete here, but we dont care
-	if(1||!isWrite) wait_for_completion(&c);
+	if(!pc) wait_for_completion(&c);
 
-#ifdef TRY_NO_DOUBLEBUFFER
-    bio_put(bio_dup);
-#endif
 
 	return 0;
 }
 
+static int bb_bio_synchronous_readwrite(
+	struct bb_device *bb,     //needed???
+	struct block_device* bdev, //destination blockdevice* needed???
+	struct request_queue *q,  //destination request_queue*
+	sector_t sector,          //sector to read/write
+	unsigned char* buf,       //src/dst data (kernel mem)
+	unsigned int bytes,       //buf size
+	bool isWrite              //true if writing to device
+	)
+{
+    return bb_bio_readwrite(bb,bdev,q,sector,buf,bytes,isWrite,NULL);
+}
+static int bb_bio_asynchronous_readwrite(
+	struct bb_device *bb,     //needed???
+	struct block_device* bdev, //destination blockdevice* needed???
+	struct request_queue *q,  //destination request_queue*
+	sector_t sector,          //sector to read/write
+	unsigned char* buf,       //src/dst data (kernel mem)
+	unsigned int bytes,       //buf size
+	bool isWrite,              //true if writing to device
+    struct completion** pc    //expected that *pc=NULL
+	)
+{
+    struct completion* c;
+    if(!pc) return -1;
+    c = (struct completion*)kzalloc(sizeof(struct completion),GFP_KERNEL);
+    if(!c) return -1;
+    *pc=c;
+    init_completion(c);
+    return bb_bio_readwrite(bb,bdev,q,sector,buf,bytes,isWrite,c);
+}
+
+static int bb_sync_sector_read(void *opaque, ADDRESS address, BYTE* data, size_t sz)
+{
+	int rc;
+	struct bb_underdisk *args = opaque;
+
+    printk(KERN_WARNING "bb_sync_sector_read %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
+
+	rc = bb_bio_synchronous_readwrite(
+		args->bb,
+		args->bdev,
+		args->q,
+		address>>9,
+		data,
+		sz,
+		false /* isWrite */
+		);
+
+	return rc;
+}
+
+static int bb_sync_sector_write(void *opaque, ADDRESS address, BYTE* data, size_t sz)
+{
+	int rc;
+	struct bb_underdisk *args = opaque;
+
+    printk(KERN_WARNING "bb_sync_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
+
+	rc = bb_bio_synchronous_readwrite(
+		args->bb,
+		args->bdev,
+		args->q,
+		address>>9,
+		data,
+		sz,
+		true /* isWrite */
+		);
+
+	return rc;
+}
+static int bb_async_sector_write(void *opaque, ADDRESS address, BYTE* data, size_t sz, void** ppcompletion)
+{
+	int rc;
+	struct bb_underdisk *args = opaque;
+
+    printk(KERN_WARNING "bb_async_sector_write %p %llx %p %08x %s\n",opaque,address,data,sz,args->bdev==args->bb->bdev_a?"PRIMARY":"CACHE");
+
+    if(ppcompletion) *ppcompletion=NULL;
+
+#ifdef BB_FAKE_ASYNC
+	rc = bb_bio_synchronous_readwrite(
+		args->bb,
+		args->bdev,
+		args->q,
+		address>>9,
+		data,
+		sz,
+		true /* isWrite */
+		);
+#else
+	rc = bb_bio_asynchronous_readwrite(
+		args->bb,
+		args->bdev,
+		args->q,
+		address>>9,
+		data,
+		sz,
+		true, /* isWrite */
+        (struct completion**)ppcompletion
+		);
+#endif
+	return rc;
+}
+static int bb_async_sector_write_waitcomplete(void *opaque, ADDRESS address, BYTE* data, size_t sz, void* pcompletion)
+{
+#ifndef BB_FAKE_ASYNC
+    wait_for_completion((struct completion*)pcompletion);
+    kfree(pcompletion);
+#endif
+    return 0;
+}
 
 /*
  * Transfer a single BIO.
