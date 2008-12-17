@@ -892,7 +892,8 @@ static int bb_bio_readwrite(
 #else
     {
         /* buf is really the original bio YYY */
-#if 0
+#if 0 /* bio_alloc didnt fix the async problem, but it may be part of a solution */
+    struct bio* bio = (struct bio*)buf;
 	bio_dup = bio_alloc(GFP_KERNEL, 1); //is 1 page correct???
     // is there a default endio? ... if not need to make one and bio_put
 
