@@ -800,10 +800,20 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
                 rtn = FALSE;
             }
             /* write cache */
-            if(0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_WRITE))
+            if(rtn==FALSE || 0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, num_cache_ops*cacheByteCnt, data, DEV_WRITE))
             {
-	            DBG({dprintf("DevOp (write cache) FAILED\n");})
+	            DBG({dprintf("DevOp (write cache) FAILED (or not tried)\n");})
                 rtn = FALSE;
+            }
+            if(rtn==FALSE) 
+            {
+                /* error writing to cache, so mark as dirty */
+		        mdataptr->p = (void*)-1;
+            }
+            else
+            {
+                /* mark not dirty */
+    		    mdataptr->p = NULL;
             }
         }
         else /* valid hit */
@@ -846,7 +856,17 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
 	            DBG({dprintf("DevOp (async write cache) FAILED\n");})
                 rtn=FALSE;
             }
-            
+           
+            if(rtn==FALSE) 
+            {
+                /* error writing to cache, so mark as dirty */
+		        mdataptr->p = (void*)-1;
+            }
+            else
+            {
+                /* mark not dirty */
+    		    mdataptr->p = NULL;
+            }
         }
 
         /* write primary (this can always be synchronous, or async and never wayt to complete, assuming back-end keeps consistency) */
