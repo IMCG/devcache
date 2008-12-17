@@ -254,7 +254,17 @@ BOOL cache_imp_fini(cache_imp* cache)
 {
 	/* cleanup hash table */
 	hash_table_finit(&cache->hash);
-	/* nothing to do to cleanup linked list */
+    /* cleanup each remaining item in the cache */
+    {struct list_head *pos,*n;
+	list_for_each_safe(pos, n, &cache->list)
+	{
+			cache_node* node = list_entry(pos,cache_node,access_list);
+			if(node) {
+		        cache_free(cache_entry(node,cached_data,cnode));
+            }
+	}}
+	/* cleanup linked list my making it empty (although really just for safety)  */
+    INIT_LIST_HEAD(&cache->list);
 	return TRUE;
 }
 
@@ -525,55 +535,6 @@ evict_restart:
 //////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////
 
-int WN_get_diskblock(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data);
-/*
-BOOL WN_get(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data, size_t sz)
-{
-	size_t i,startblock;
-	size_t bs = (1ull<<ictx->ctx->dev_ops.log2_blocksize);
-	ADDRESS base;
-	size_t offset;
-	offset = ((size_t)addr) & (bs-1);
-	base = addr & ~((ADDRESS)(bs-1));
-	startblock=0;
-
-	DBG({dprintf("WN_get: addr:0x%08llx\n",addr);})
-
-	if(offset!=0)
-	{
-		size_t toCopy;
-		BYTE* buf = (BYTE*)cache_malloc(bs);
-		if(!buf) return FALSE;
-		if(0==WN_get_diskblock(ictx,base,buf))
-		{
-			cache_free(buf);
-			return FALSE;
-		}
-		toCopy = bs-offset>sz?sz:bs-offset;
-		memcpy(data,buf+offset,toCopy);
-		cache_free(buf);
-		startblock=bs;
-		sz-=toCopy;
-	}
-	for(i=startblock;(i+bs)<=sz;i+=bs)
-	{
-		if(0==WN_get_diskblock(ictx,base+i,data-offset+i)) return FALSE;
-	}
-	if(sz>i)
-	{
-		BYTE* buf = (BYTE*)cache_malloc(bs);
-		if(!buf) return FALSE;
-		if(0==WN_get_diskblock(ictx,base+i,buf))
-		{
-			cache_free(buf);
-			return FALSE;
-		}
-		memcpy(data-offset+i,buf,sz-i);
-		cache_free(buf);
-	}
-	return TRUE;
-}
-*/
 
 /*** FIX implment: async callback will lock the entry, free/null buff, unlock entry ***/
 typedef struct WN_cache_asyncwrite_callback_data_st {
@@ -617,7 +578,7 @@ BOOL CACHEi_MakeCacheNode(PCACHE_ICTX ictx, cached_data** cdata, BOOL* gotEvicte
 		if(gotEvictee) *gotEvictee=FALSE;
 
 		/* create new entry for cache */
-		mdataptr = ictx->ctx->mem_ops.malloc(sizeof(cached_data));
+		mdataptr = cache_malloc(sizeof(cached_data));
 		if(!mdataptr) {
 			return FALSE;
 		}
@@ -814,7 +775,7 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
 			/* allocate cachedev blocks */
    			if(0!=DevOp(ictx, DEV_CACHE, &mdataptr->addr, cacheByteCnt*num_cache_ops, data, DEV_ALLOC))
 			{
-				if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+				if(mdataptr) cache_free(mdataptr);
 	            DBG({dprintf("DevOp (alloc cachedev blocks) FAILED\n");})
 				return FALSE;
 			}
@@ -914,7 +875,7 @@ int WNWT_getput_diskblock_obj(PCACHE_ICTX ictx, ADDRESS addr, BYTE* data,BOOL is
         /* insert cache entry */
        	if(!cache_insert_node(cache,&addr,&mdataptr->cnode))
         	{
-    			if(mdataptr) ictx->ctx->mem_ops.free(mdataptr);
+    			if(mdataptr) cache_free(mdataptr);
 	            DBG({dprintf("cache_insert_node FAILED\n");})
     			return FALSE;
     	}
