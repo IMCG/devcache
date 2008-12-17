@@ -352,10 +352,15 @@ static int bb_set_fd(struct bb_device *bb,
 #ifndef DISABLE_CACHE
         // if we already had a cache, destroy it and free memory
         if(bb->ctx) {
-/* BUGS during free! XXX */
-//            CACHE_destroy(bb->ctx); //not sure what happends if outstanding async writes!
-//            kfree(bb->ctx);
+#ifdef SIMPLE_LOCKS
+            mutex_lock(&bb->cache_lock);
+#endif
+            CACHE_destroy(bb->ctx); 
+            kfree(bb->ctx);
             bb->ctx = NULL;
+#ifdef SIMPLE_LOCKS
+            mutex_unlock(&bb->cache_lock);
+#endif
         }
 
         /* Initialize Cache implementation for bb */

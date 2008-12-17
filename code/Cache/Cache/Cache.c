@@ -654,7 +654,7 @@ inline int DevOpEx(PCACHE_ICTX ictx, int device, ADDRESS* addr, size_t bytelen, 
     unsigned int i,num_ops;
     unsigned int blocksize;
 
-    printf("DevOp: %p %s %p=%08llx %d %p %d\n",ictx,device==DEV_PRIMARY?"PRIMARY":"CACHE",addr,*addr,bytelen,data,op);
+    DBGL(4,{dprintf("DevOp: %p %s %p=%08llx %d %p %d\n",ictx,device==DEV_PRIMARY?"PRIMARY":"CACHE",addr,*addr,bytelen,data,op);})
 
     CACHE_DEVOPS* ops;
     if(device==DEV_PRIMARY)
