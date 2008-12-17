@@ -1,5 +1,5 @@
 # Comment/uncomment the following line to disable/enable debugging
-DEBUG = y
+#DEBUG = y
 #CACHE_DISABLED = y
 
 ifeq ($(CACHE_DISABLED),y)
